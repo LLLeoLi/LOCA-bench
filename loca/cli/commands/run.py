@@ -276,7 +276,7 @@ def run_command(
 
     # Build output directory
     if output_dir:
-        final_output_dir = Path(output_dir)
+        final_output_dir = Path(output_dir).resolve()
     else:
         try:
             final_output_dir = build_output_dir(

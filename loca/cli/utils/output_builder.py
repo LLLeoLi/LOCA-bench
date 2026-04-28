@@ -170,7 +170,7 @@ def build_output_dir(
             pass  # Fall through to build path without timestamp
         else:
             # Use provided path directly
-            output_path = Path(resume_dir)
+            output_path = Path(resume_dir).resolve()
             if not output_path.is_dir():
                 raise FileNotFoundError(
                     f"Resume directory does not exist: {output_path}"
