@@ -209,6 +209,12 @@ class ProgrammaticToolCallingTool(MCPTool):
     across calls; ``tools["x"](...)`` RPCs back to this process and returns a
     native Python value (raising on tool error); the observation returned to
     the model is the kernel output in the exact training-side format.
+
+    If the kernel dies unrecoverably (hard-killed after a timeout that could
+    not be interrupted, or the process crashed), it is torn down and a fresh
+    kernel is started on the next ``code_execution`` call. Kernel state
+    (variables, imports) is lost across such a restart; the observation for
+    the failing call tells the model so.
     """
 
     def __init__(
@@ -337,7 +343,16 @@ class ProgrammaticToolCallingTool(MCPTool):
 
     @staticmethod
     def _is_code_execution_tool(real_name: str) -> bool:
-        """True for the programmatic_tool_calling server's code_execution tool."""
+        """True for the programmatic_tool_calling server's code_execution tool.
+
+        With multiple servers FastMCP prefixes the name
+        ("programmatic_tool_calling_code_execution"); with the PTC server as
+        the only server the name is bare ("code_execution") -- without the
+        bare-name match interception silently fails there and the stateless
+        server-body fallback runs instead of the kernel.
+        """
+        if real_name == "code_execution":
+            return True
         return "programmatic_tool_calling" in real_name and "code_execution" in real_name
 
     # ------------------------------------------------------------------
@@ -680,6 +695,27 @@ class ProgrammaticToolCallingTool(MCPTool):
             # request at a time and interleaved calls would mix up outputs.
             with self._exec_lock:
                 observation, success = sandbox.execute(code)
+            # An unrecoverable kill (timeout that could not be interrupted, or
+            # a kernel crash such as the RLIMIT_AS OOM kill) leaves the kernel
+            # dead. Tear it down so the next code_execution starts a fresh
+            # kernel instead of failing for the rest of the task. Kernel state
+            # is lost; rewrite the (now stale) kernel message and tell the
+            # model explicitly.
+            if not success and getattr(sandbox, "_dead", False):
+                self._teardown_sandbox()
+                observation = observation.replace(
+                    "Sandbox killed; subsequent code will not run.",
+                    "Sandbox killed.",
+                ).replace(
+                    "(killed after a previous timeout / crash). Subsequent code will not run.",
+                    "(killed after a previous timeout / crash).",
+                )
+                observation += (
+                    "\n\n[note] The Python sandbox was killed and a fresh one will be "
+                    "started automatically on your next code_execution call. All "
+                    "variables, imports and function definitions are lost -- "
+                    "re-create any state you still need."
+                )
             # bwrap denies out-of-workspace writes with a bare EROFS ("Read-only
             # file system"), which reads like a disk fault rather than a policy.
             # Append a hint so the model retries into the workspace instead of

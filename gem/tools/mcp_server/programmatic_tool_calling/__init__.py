@@ -1,8 +1,9 @@
-"""Programmatic Tool Calling MCP Server
+"""Programmatic Tool Calling (PTC)
 
-An MCP server that provides Python code execution with embedded tool calling capabilities.
-When code execution encounters a tool call, it pauses, executes the tool via the tool executor,
-and continues with the tool result injected back into the code execution context.
+Exposes a ``code_execution`` tool that runs model-written Python in a
+persistent IPython kernel (StatefulSandbox); ``tools["name"](...)`` calls
+inside the code dispatch to the environment's real MCP tools over a
+unix-socket bridge. See README.md and helper.py for details.
 """
 
 from .helper import (

@@ -2,11 +2,12 @@
 """
 Programmatic Tool Calling MCP Server
 
-An MCP server that provides Python code execution with embedded tool calling capabilities.
-When code execution encounters a tool call, it pauses, executes the tool via the tool executor,
-and continues with the tool result injected back into the code execution context.
-
-Based on python_execute MCP server but with programmatic tool calling support.
+Registers the ``code_execution`` tool so MCP discovery exposes it to the model.
+In normal LOCA-Bench runs the tool body here never executes:
+``ProgrammaticToolCallingTool`` (helper.py) intercepts code_execution calls and
+runs the code in a persistent IPython kernel with a working ``tools`` bridge.
+The body below is a standalone fallback (running this server directly without
+the wrapper) that executes pure Python only -- ``tools[...]`` raises there.
 """
 
 import os
@@ -17,7 +18,7 @@ import uuid
 import json
 import traceback
 from pathlib import Path
-from typing import Annotated, Optional, List, Dict, Any, Callable
+from typing import Annotated
 from io import StringIO
 from contextlib import redirect_stdout, redirect_stderr
 
@@ -90,137 +91,33 @@ PTC_TOOL_DESCRIPTION_RICH = (
     "```"
 )
 
-# Global tool executor - will be set by the tool that creates this server
-_tool_executor: Optional[Callable[[str, Dict[str, Any]], tuple]] = None
-
-
-def set_tool_executor(executor: Callable[[str, Dict[str, Any]], tuple]):
-    """Set the tool executor function.
-
-    The executor should be a callable that takes (tool_name, tool_args) and returns:
-    (tool_parsed, tool_execute_error, observation, returned_tool_name, returned_tool_call_id)
-    """
-    global _tool_executor
-    _tool_executor = executor
-
-
 def get_workspace() -> str:
     """Get the workspace directory from environment or use default."""
     return os.environ.get("PROGRAMMATIC_TOOL_CALLING_WORKSPACE", DEFAULT_WORKSPACE)
 
 
-class ToolCallInterceptor:
+class _UnavailableTools:
+    """``tools`` stub for the standalone fallback body.
+
+    Tool calls only work through the kernel bridge that
+    ``ProgrammaticToolCallingTool`` sets up in the parent process; when this
+    server runs standalone there is nothing to dispatch to, so any access
+    fails loudly instead of returning placeholder garbage.
     """
-    A class that intercepts function calls and records them for later execution.
-
-    Since MCP servers run in separate processes, actual tool execution happens
-    in the parent process. This class just records tool calls and returns
-    placeholder values that will be replaced with actual results later.
-    """
-
-    def __init__(self, tool_results_cache: Optional[Dict[str, str]] = None):
-        """
-        Args:
-            tool_results_cache: Pre-computed results from previous tool executions
-                               Format: {tool_call_id: observation}
-        """
-        self.tool_calls_made = []
-        self.tool_results = []
-        self.tool_results_cache = tool_results_cache or {}
-
-    def __getattr__(self, tool_name: str):
-        """Intercept attribute access as a tool call: ``tools.tool_name(...)``."""
-        return self._make_tool_function(tool_name)
-
-    def __getitem__(self, tool_name: str):
-        """Intercept subscript access as a tool call: ``tools["tool_name"](...)``."""
-        return self._make_tool_function(tool_name)
-
-    def _make_tool_function(self, tool_name: str):
-        """Build the callable that records/returns the result for one tool name."""
-        def tool_function(*args, **kwargs):
-            """Record the tool call and return its cached native result if available."""
-            if args:
-                # MCP tools take named parameters; positional args cannot be mapped.
-                raise TypeError(
-                    f"tools[{tool_name!r}] must be called with keyword arguments, "
-                    f"e.g. tools[{tool_name!r}](id='A001')"
-                )
-
-            # Generate a deterministic cache key based on tool name and args
-            # This ensures the same call gets the same result across passes
-            import json
-            import hashlib
-            args_str = json.dumps(kwargs, sort_keys=True)
-            cache_key = f"{tool_name}:{args_str}"
-            hash_suffix = hashlib.md5(cache_key.encode()).hexdigest()[:8]
-            tool_call_id = f"call_{hash_suffix}"
-
-            # Record the tool call
-            self.tool_calls_made.append({
-                "tool_name": tool_name,
-                "args": kwargs,
-                "tool_call_id": tool_call_id,
-            })
-
-            # Check if we have a cached result for this call
-            if tool_call_id in self.tool_results_cache:
-                raw = self.tool_results_cache[tool_call_id]
-                # Record the (non-pending) result before decoding so a decode that
-                # raises (tool errored) still leaves this call marked as resolved.
-                self.tool_results.append({
-                    "tool_call_id": tool_call_id,
-                    "observation": raw,
-                    "has_error": False,
-                })
-                return self._decode_cached(raw)
-
-            # First pass - return a placeholder.
-            # This will trigger re-execution after tools are actually run.
-            observation = f"__TOOL_CALL_PENDING_{tool_call_id}__"
-            self.tool_results.append({
-                "tool_call_id": tool_call_id,
-                "observation": observation,
-                "has_error": False,
-            })
-            return observation
-
-        return tool_function
 
     @staticmethod
-    def _decode_cached(raw: str):
-        """Turn a cached tool result into the native value user code receives.
+    def _unavailable(name: str):
+        raise RuntimeError(
+            f"tools[{name!r}] is unavailable: this server is running standalone "
+            "without the ProgrammaticToolCallingTool wrapper, so environment "
+            "tools cannot be dispatched. Only pure Python runs here."
+        )
 
-        The parent process caches results in the wire envelope
-        ``{"__ptc__": true, "ok": bool, "value": <raw tool output text>}``.
-        - ``ok=False`` -> raise ``RuntimeError(value)`` so code can ``try/except``.
-        - ``ok=True``  -> return the payload as a native Python value: ``json.loads``
-          the text when it is JSON (dict/list/number/...), otherwise the raw string.
-        Values that are not in the envelope form are returned as-is (best-effort
-        JSON-decoded), keeping backward compatibility.
-        """
-        import json
-        try:
-            env = json.loads(raw)
-        except (ValueError, TypeError):
-            env = None
+    def __getitem__(self, name: str):
+        self._unavailable(name)
 
-        if isinstance(env, dict) and env.get("__ptc__") is True:
-            value = env.get("value", "")
-            if not env.get("ok", True):
-                raise RuntimeError(value if isinstance(value, str) else str(value))
-            if isinstance(value, str):
-                try:
-                    return json.loads(value)
-                except (ValueError, TypeError):
-                    return value
-            return value
-
-        # Fallback: treat the raw string as the value itself.
-        try:
-            return json.loads(raw)
-        except (ValueError, TypeError):
-            return raw
+    def __getattr__(self, name: str):
+        self._unavailable(name)
 
 
 @app.tool(description=PTC_TOOL_DESCRIPTION_RICH)
@@ -240,19 +137,17 @@ def code_execution(
     In normal LOCA-Bench runs this body never executes:
     ``ProgrammaticToolCallingTool`` intercepts code_execution and runs the code
     in a persistent IPython kernel (see helper.py). The body is kept as a
-    standalone fallback (e.g. running this server directly) and still returns
-    the full structured JSON described below.
+    standalone fallback (e.g. running this server directly); it executes pure
+    Python only -- ``tools[...]`` raises, since there is no parent process to
+    dispatch tool calls to.
 
     Args:
-        code: Python code to execute; tool calls go through the injected ``tools`` mapping.
+        code: Python code to execute.
 
     Returns:
         JSON string with keys: success, execution_time_seconds, timeout_limit_seconds,
-        stdout, stderr, return_value, error, plus the internal fields tool_calls,
-        tool_results, needs_tool_execution, file_path.
+        stdout, stderr, return_value, error, file_path.
     """
-    tool_results_cache: Optional[Dict[str, str]] = None
-
     try:
         timeout = 30
         filename = f"programmatic_{uuid.uuid4().hex[:8]}.py"
@@ -273,9 +168,6 @@ def code_execution(
         file_path = os.path.join(tmp_dir, filename)
         with open(file_path, 'w', encoding='utf-8') as f:
             f.write(code)
-
-        # Create tool interceptor with cache
-        interceptor = ToolCallInterceptor(tool_results_cache)
 
         # Prepare execution environment. os/json/csv/sys are pre-imported to match
         # the tool description so the model can use them without an import line.
@@ -303,7 +195,7 @@ def code_execution(
         exec_globals = {
             "__name__": "__main__",
             "__file__": file_path,
-            "tools": interceptor,  # Inject the tool interceptor
+            "tools": _UnavailableTools(),  # Standalone mode: tool calls raise
             "WORKSPACE": agent_workspace,  # Provide workspace path for file operations
             "os": os,
             "sys": sys,
@@ -347,12 +239,6 @@ def code_execution(
         stdout_content = stdout_capture.getvalue()
         stderr_content = stderr_capture.getvalue()
 
-        # Check if there are pending tool calls
-        needs_tool_execution = any(
-            "__TOOL_CALL_PENDING_" in str(tr.get("observation", ""))
-            for tr in interceptor.tool_results
-        )
-
         # Build structured result
         result = {
             "success": execution_error is None,
@@ -360,9 +246,6 @@ def code_execution(
             "timeout_limit_seconds": timeout,
             "stdout": stdout_content if stdout_content else None,
             "stderr": stderr_content if stderr_content else None,
-            "tool_calls": interceptor.tool_calls_made,
-            "tool_results": interceptor.tool_results,
-            "needs_tool_execution": needs_tool_execution,
             "return_value": str(return_value) if return_value is not None else None,
             "error": execution_error,
             "file_path": file_path,
@@ -419,9 +302,6 @@ if __name__ == "__main__":
 
     # Set workspace environment variable
     os.environ["PROGRAMMATIC_TOOL_CALLING_WORKSPACE"] = os.path.abspath(args.workspace)
-
-    # Note: Tool executor must be set via set_tool_executor() before use
-    print("Warning: Tool executor not configured. Use set_tool_executor() to configure.", file=sys.stderr)
 
     # Run the server
     if args.transport == "stdio":
