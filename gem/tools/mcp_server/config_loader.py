@@ -183,7 +183,12 @@ class ServerConfigLoader:
         if not package_name:
             raise ValueError("uvx command_type requires 'package_name' in execution config")
 
-        args = [package_name]
+        args = []
+        # Extra requirement specs resolved into the ephemeral uvx environment,
+        # used to pin transitive dependencies (e.g. "mcp<2" for cli-mcp-server)
+        for requirement in execution.get("with_requirements", []):
+            args.extend(["--with", requirement])
+        args.append(package_name)
         args.extend(self._build_cli_args(config, params))
 
         return "uvx", args
@@ -242,6 +247,36 @@ class ServerConfigLoader:
 
         return executable_name, args
 
+    def _resolve_param_value(
+        self, param_name: str, param_spec: Dict[str, Any], params: Dict[str, Any]
+    ) -> Optional[Any]:
+        """Resolve a parameter value: explicit value, then aliases, then default.
+
+        Placeholders like {agent_workspace} are replaced from params; a value
+        that resolves to an empty string is treated as unresolved.
+
+        Raises:
+            ValueError: If the parameter is required but not provided
+        """
+        param_value = params.get(param_name)
+        if param_value is None and "aliases" in param_spec:
+            for alias in param_spec["aliases"]:
+                if params.get(alias) is not None:
+                    param_value = params[alias]
+                    break
+
+        if param_value is None:
+            if param_spec.get("required", False):
+                raise ValueError(f"Required parameter '{param_name}' not provided")
+            param_value = param_spec.get("default")
+
+        if isinstance(param_value, str):
+            param_value = self._replace_placeholders(param_value, params)
+            if param_value == "":
+                return None
+
+        return param_value
+
     def _build_cli_args(self, config: Dict[str, Any], params: Dict[str, Any]) -> List[str]:
         """Build CLI arguments from parameters.
 
@@ -261,27 +296,11 @@ class ServerConfigLoader:
             if "alias_for" in param_spec:
                 continue  # Skip aliases, they'll be resolved when processing the target param
 
-            # Get parameter value (check aliases too)
-            param_value = params.get(param_name)
-            if param_value is None and "aliases" in param_spec:
-                for alias in param_spec["aliases"]:
-                    if alias in params:
-                        param_value = params[alias]
-                        break
-
-            # Use default if value not provided
-            if param_value is None:
-                if param_spec.get("required", False):
-                    raise ValueError(f"Required parameter '{param_name}' not provided")
-                param_value = param_spec.get("default")
+            param_value = self._resolve_param_value(param_name, param_spec, params)
 
             # Skip if no value
             if param_value is None:
                 continue
-
-            # Replace placeholders
-            if isinstance(param_value, str):
-                param_value = self._replace_placeholders(param_value, params)
 
             # Add to args if cli_arg specified
             cli_arg = param_spec.get("cli_arg")
@@ -306,6 +325,7 @@ class ServerConfigLoader:
             Dictionary of environment variables
         """
         env = {}
+        explicit_env_vars = set()
         param_config = config.get("parameters", {})
 
         for param_name, param_spec in param_config.items():
@@ -313,30 +333,27 @@ class ServerConfigLoader:
             if "alias_for" in param_spec:
                 continue
 
-            # Get parameter value (check aliases too)
-            param_value = params.get(param_name)
-            if param_value is None and "aliases" in param_spec:
-                for alias in param_spec["aliases"]:
-                    if alias in params:
-                        param_value = params[alias]
-                        break
-
-            # Use default if value not provided
-            if param_value is None:
-                param_value = param_spec.get("default")
+            param_value = self._resolve_param_value(param_name, param_spec, params)
 
             # Skip if no value
             if param_value is None:
                 continue
 
-            # Replace placeholders
-            if isinstance(param_value, str):
-                param_value = self._replace_placeholders(param_value, params)
-
             # Add to env if env_var specified
             env_var = param_spec.get("env_var")
             if env_var:
+                # When several parameters map to the same env var, a value that
+                # falls back to a spec default must not clobber a value the
+                # caller provided explicitly (e.g. terminal's ALLOWED_DIR).
+                was_explicit = params.get(param_name) is not None or any(
+                    params.get(alias) is not None
+                    for alias in param_spec.get("aliases", [])
+                )
+                if env_var in explicit_env_vars and not was_explicit:
+                    continue
                 env[env_var] = str(param_value)
+                if was_explicit:
+                    explicit_env_vars.add(env_var)
 
         # Add terminal-specific env vars if present
         if config["name"] == "terminal":
@@ -387,9 +404,12 @@ class ServerConfigLoader:
         # Determine which parameter contains the workspace path
         cwd_param = workspace.get("cwd_param")
         if cwd_param:
-            cwd_value = params.get(cwd_param)
+            # Resolve through the parameter spec so aliases and defaults are
+            # honoured (task configs typically pass e.g. `workspace_dir` for a
+            # `workspace_path` cwd_param).
+            param_spec = config.get("parameters", {}).get(cwd_param, {})
+            cwd_value = self._resolve_param_value(cwd_param, param_spec, params)
             if cwd_value:
-                cwd_value = self._replace_placeholders(cwd_value, params)
                 cwd_path = Path(cwd_value).resolve()
 
                 # Create directory if it doesn't exist and mkdir_if_needed is True
@@ -485,11 +505,15 @@ class ServerConfigLoader:
         if not isinstance(value, str):
             return value
 
-        # Replace common placeholders
+        # Replace common placeholders plus any {param_name} whose value is a
+        # plain string in params (e.g. {workspace_path} used in YAML defaults)
         replacements = {
             "{task_workspace}": params.get("task_workspace", ""),
             "{agent_workspace}": params.get("agent_workspace", ""),
         }
+        for key, param_value in params.items():
+            if isinstance(param_value, str) and "{" not in param_value:
+                replacements.setdefault(f"{{{key}}}", param_value)
 
         for placeholder, replacement in replacements.items():
             if placeholder in value:

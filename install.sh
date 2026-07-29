@@ -93,6 +93,14 @@ else
   exit 1
 fi
 
+# ====== 1b) Pre-build mcp_convert uv environment ======
+# uv-based MCP servers (google_cloud, calendar, google_sheet, snowflake,
+# woocommerce) are launched at eval time via `uv --directory mcp_convert run`.
+# Building the env now (managed Python >=3.12 download + deps from uv.lock)
+# keeps first-task server startup well under the 120s MCP discovery timeout.
+log "Pre-building mcp_convert uv environment..."
+uv --directory "$PROJECT_DIR/mcp_convert" sync
+
 # ====== 2) nvm + Node ======
 log "Installing nvm ($NVM_VERSION) and Node.js ($NODE_MAJOR)..."
 export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
@@ -151,9 +159,12 @@ log "Installing npm global packages..."
 npm install -g @modelcontextprotocol/server-filesystem @modelcontextprotocol/server-memory
 
 # ====== 5) Pre-cache uvx tools ======
+# Warm the exact ephemeral environments the eval-time uvx invocations resolve
+# (matching the `with_requirements` pins in gem/tools/mcp_server/config/*.yaml).
+# </dev/null makes the stdio servers exit immediately after the env is built.
 log "Pre-caching uvx tools (ignore failures)..."
 uvx --help || true
-uv tool install cli-mcp-server  || true
-uv tool install pdf-tools-mcp  || true
+ALLOWED_DIR=/tmp uvx --with "mcp<2" cli-mcp-server </dev/null || true
+uvx pdf-tools-mcp </dev/null || true
 
 log "Done ✅"

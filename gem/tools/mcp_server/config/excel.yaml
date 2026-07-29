@@ -14,6 +14,8 @@ parameters:
     required: false
     default: "."
     env_var: "EXCEL_FILES_PATH"
+    aliases:
+      - agent_workspace
     description: "Path to Excel files directory"
 
   env_vars:

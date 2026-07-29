@@ -152,7 +152,9 @@ def setup_mcp_servers(
             continue
             
         server_type = server_config.get("type")
-        params = server_config.get("params", {})
+        # Copy so placeholder substitution never mutates the caller's config
+        # (the same config dict may be reused for multiple runs)
+        params = dict(server_config.get("params", {}))
         
         # Replace path placeholders
         for key, value in params.items():
@@ -1022,6 +1024,17 @@ def run_single_task(
 
         # Save tools information for later storage
         tools_info = tools[0] if tools else None
+
+        # Fail loudly if the task declared MCP servers but no tool schema was
+        # produced — otherwise the model silently runs without any tools.
+        if not tools_info and any(
+            cfg.get("enabled", True) for cfg in mcp_configs.values()
+        ):
+            raise RuntimeError(
+                f"MCP servers {list(mcp_configs.keys())} are enabled for this task "
+                f"but tool discovery produced no tools; refusing to run the task "
+                f"without tools."
+            )
 
         # Note: When memory_tool is enabled, we use Claude's native memory_20250818 tool
         # The MCP memory tools (view, create, str_replace, etc.) are filtered out from Claude's view

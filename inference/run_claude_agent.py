@@ -95,7 +95,9 @@ def setup_mcp_servers(
             continue
             
         server_type = server_config.get("type")
-        params = server_config.get("params", {})
+        # Copy so placeholder substitution never mutates the caller's config
+        # (setup_mcp_servers is called twice per task in this runner)
+        params = dict(server_config.get("params", {}))
         
         # Replace path placeholders
         for key, value in params.items():
@@ -197,6 +199,10 @@ def setup_mcp_servers_for_claude_agent(
         # Add env if present
         if "env" in server_config:
             claude_agent_mcp_servers[server_name]["env"] = server_config["env"]
+        # Preserve the working directory so servers that rely on cwd for
+        # workspace confinement don't fall back to the runner's cwd
+        if "cwd" in server_config:
+            claude_agent_mcp_servers[server_name]["cwd"] = server_config["cwd"]
 
     return claude_agent_mcp_servers
 
@@ -753,6 +759,17 @@ def run_single_task(
 
         # Save tools information
         tools_info = tools[0] if tools else None
+
+        # Fail loudly if the task declared MCP servers but no tool schema was
+        # produced — otherwise the model silently runs without any tools.
+        if not tools_info and any(
+            cfg.get("enabled", True) for cfg in mcp_configs.values()
+        ):
+            raise RuntimeError(
+                f"MCP servers {list(mcp_configs.keys())} are enabled for this task "
+                f"but tool discovery produced no tools; refusing to run the task "
+                f"without tools."
+            )
 
         print(f"[{task_label}] Environment initialized")
         print(f"[{task_label}] User prompt length: {len(user_prompt)}")

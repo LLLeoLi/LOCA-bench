@@ -17,6 +17,7 @@ parameters:
     description: "Workspace directory for Python execution"
     aliases:
       - workspace_dir
+      - agent_workspace
 
 workspace:
   set_cwd: true

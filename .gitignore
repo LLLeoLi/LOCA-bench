@@ -186,6 +186,7 @@ evals/game/wandb*
 evals/benchmarks/*/wandb*
 evals/benchmarks/*/data*
 *.lock
+!mcp_convert/uv.lock
 evals/benchmarks/wandb*
 evals/benchmarks/*/eval_res*
 evals/game/results*

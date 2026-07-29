@@ -6,6 +6,8 @@ description: Terminal command execution server with security controls
 execution:
   command_type: uvx
   package_name: "cli-mcp-server"
+  with_requirements:
+    - "mcp<2"  # cli-mcp-server 0.2.x uses the mcp 1.x low-level Server API
 
 parameters:
   agent_workspace:
@@ -18,7 +20,9 @@ parameters:
     required: false
     default: "."
     env_var: "ALLOWED_DIR"
-    description: "Directory where file operations are permitted (alias for agent_workspace, also sets ALLOWED_DIR). If both are set, this takes precedence."
+    aliases:
+      - agent_workspace
+    description: "Directory where file operations are permitted (alias for agent_workspace, also sets ALLOWED_DIR). If both are set, this takes precedence; if unset, falls back to agent_workspace."
 
   allowed_commands:
     required: false

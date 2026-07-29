@@ -12,9 +12,10 @@ parameters:
     required: false
     default: "."
     cli_arg: ""  # Positional argument
-    description: "Directory path that the filesystem server can access. If not specified, uses workspace_path or current directory."
+    description: "Directory path that the filesystem server can access. If not specified, uses workspace_path, then agent_workspace, then current directory."
     aliases:
       - workspace_path
+      - agent_workspace
 
   workspace_path:
     required: false

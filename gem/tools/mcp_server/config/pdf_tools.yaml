@@ -12,6 +12,8 @@ parameters:
     required: false
     default: "."
     cli_arg: "--workspace_path"
+    aliases:
+      - agent_workspace
     description: "Workspace directory for PDF operations"
 
   tempfile_dir:

@@ -39,7 +39,19 @@ if str(gem_root) not in sys.path:
 
 from fastmcp import FastMCP
 
-from gem.tools.mcp_server.bwrap_confine import bwrap_usable, build_bwrap_argv
+# Load bwrap_confine directly from its file path instead of via the gem.tools
+# package: importing the package runs gem/tools/__init__.py, which pulls in
+# mcp_tool and replaced this server's sys.stdout with a filter object, crashing
+# the MCP stdio transport at startup (the server then silently ran without
+# being discoverable).
+import importlib.util as _importlib_util
+
+_bwrap_path = Path(__file__).parent.parent / "bwrap_confine.py"
+_bwrap_spec = _importlib_util.spec_from_file_location("bwrap_confine", str(_bwrap_path))
+_bwrap_module = _importlib_util.module_from_spec(_bwrap_spec)
+_bwrap_spec.loader.exec_module(_bwrap_module)
+bwrap_usable = _bwrap_module.bwrap_usable
+build_bwrap_argv = _bwrap_module.build_bwrap_argv
 
 # Create FastMCP server
 app = FastMCP("Python Execute Server")

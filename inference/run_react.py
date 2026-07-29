@@ -197,8 +197,10 @@ def setup_mcp_servers(
             continue
             
         server_type = server_config.get("type")
-        params = server_config.get("params", {})
-        
+        # Copy so placeholder substitution never mutates the caller's config
+        # (the same config dict may be reused for multiple runs)
+        params = dict(server_config.get("params", {}))
+
         # Replace path placeholders
         for key, value in params.items():
             if isinstance(value, str):
@@ -1204,8 +1206,11 @@ def run_single_task(
             for config in mcp_configs.values()
         )
 
-        # Only fix schema for OpenAI models
-        fix_schema = "openai" in model.lower()
+        # Repair schemas (e.g. arrays missing 'items') for OpenAI-compatible
+        # endpoints. The fix is a no-op for already-valid schemas, and the
+        # OpenAI API rejects the entire tools array otherwise — matching only
+        # the literal substring "openai" missed gpt-*/o* model IDs.
+        fix_schema = True
 
         if has_programmatic:
             tool = ProgrammaticToolCallingTool(mcp_config, validate_on_init=False, execution_timeout=120.0, fix_schema_for_openai=fix_schema)
@@ -1220,6 +1225,18 @@ def run_single_task(
 
         # Save tools information for later storage
         tools_info = tools[0] if tools else None
+
+        # Fail loudly if the task declared MCP servers but no tool schema was
+        # produced — otherwise the model silently runs without any tools.
+        has_enabled_servers = any(
+            cfg.get("enabled", True) for cfg in mcp_configs.values()
+        )
+        if has_enabled_servers and not tools_info:
+            raise RuntimeError(
+                f"MCP servers {list(mcp_configs.keys())} are enabled for this task "
+                f"but tool discovery produced no tools; refusing to run the task "
+                f"without tools."
+            )
 
         if verbose:
             print(f"[Task {task_id} | {task_label}] Environment initialized")

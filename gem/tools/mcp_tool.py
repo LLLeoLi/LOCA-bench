@@ -78,13 +78,19 @@ def _patch_stdio_transport_for_quiet_mode() -> None:
 _patch_stdio_transport_for_quiet_mode()
 
 
-class _StreamFilter(io.TextIOWrapper):
+class _StreamFilter:
     """Filter a stream to suppress harmless MCP server warnings and startup messages.
 
     The @modelcontextprotocol/server-filesystem npm package prints
     "Failed to request initial roots from client" warnings that are
     harmless but noisy. FastMCP also prints startup messages to stderr.
     This filter suppresses them.
+
+    Deliberately NOT a subclass of io.TextIOWrapper: subclassing without
+    calling __init__ left attributes like ``buffer`` as None, which crashed
+    any MCP stdio server that imported this module (mcp's stdio_server wraps
+    ``sys.stdout.buffer``). All unknown attributes, including ``buffer``,
+    are delegated to the original stream instead.
     """
 
     # Patterns to suppress (harmless MCP startup messages and npm noise)
@@ -227,6 +233,14 @@ def is_timeout_error(error: Exception) -> bool:
         keyword in error_str
         for keyword in ["etimedout", "econnreset", "timeout", "timed out"]
     )
+
+
+class MCPToolDiscoveryError(Exception):
+    """Raised when tool discovery fails for every retry attempt.
+
+    Deliberately not a RuntimeError: _run_async treats RuntimeError as an
+    event-loop conflict and would re-await the same coroutine.
+    """
 
 
 class MCPTool(BaseTool):
@@ -487,6 +501,20 @@ class MCPTool(BaseTool):
 
             print(f"[MCP] Discovering tools from servers...")
             tools = _run_async(self._async_discover_tools())
+
+            # FastMCP silently skips servers it cannot connect to, so a
+            # "successful" discovery may still be missing entire servers.
+            # Detect that via the per-server tool-name prefixes and fail
+            # loudly instead of letting tasks run with a partial toolset.
+            missing = self._find_missing_servers(tools)
+            if missing:
+                raise MCPToolDiscoveryError(
+                    f"MCP server(s) {missing} provided no tools "
+                    f"(likely failed to start and were skipped by the client). "
+                    f"Discovered {len(tools)} tools from the remaining servers. "
+                    f"Configuration: {self._get_server_description()}"
+                )
+
             self._available_tools = tools
             self._tools_discovered = True
             print(f"[MCP] Discovered {len(tools)} tools")
@@ -496,10 +524,18 @@ class MCPTool(BaseTool):
             return tools
 
     async def _async_discover_tools(self) -> List[Dict[str, Any]]:
-        """Discover tools using fastMCP client."""
+        """Discover tools using fastMCP client.
+
+        Raises:
+            MCPToolDiscoveryError: If discovery fails on every retry attempt.
+                Failing loudly here prevents tasks from silently running with
+                zero tools when an MCP server cannot be started.
+        """
         tools: List[Dict[str, Any]] = []
+        last_error: Optional[Exception] = None
 
         for attempt in range(self.max_retries):
+            tools = []
             try:
                 # Must use async with to establish connection
                 # This works in our thread approach as long as enter/exit happens in same task
@@ -537,19 +573,37 @@ class MCPTool(BaseTool):
                             "server_info": server_info,
                         }
                         tools.append(tool_info)
-                # Exit async with before break - ensures proper cleanup
-                break
+                # The async with block has exited, so cleanup already happened
+                return tools
 
             except Exception as e:  # noqa: BLE001
+                last_error = e
                 logger.warning(f"Tool discovery attempt {attempt + 1} failed: {e}")
                 if attempt < self.max_retries - 1:
                     await asyncio.sleep(self.delay_between_retries)
-                else:
-                    logger.error(
-                        f"Failed to discover tools after {self.max_retries} attempts"
-                    )
+
+        if last_error is not None:
+            raise MCPToolDiscoveryError(
+                f"MCP tool discovery failed after {self.max_retries} attempts for "
+                f"{self._get_server_description()}: {last_error}"
+            ) from last_error
 
         return tools
+
+    def _find_missing_servers(self, tools: List[Dict[str, Any]]) -> List[str]:
+        """Return configured server names that contributed no tools.
+
+        For multi-server configs FastMCP prefixes tool names with the server
+        name; a server with no matching prefix was skipped or exposes nothing.
+        """
+        server_names = self._get_server_names()
+        if len(server_names) <= 1:
+            return [] if tools else list(server_names)
+        return [
+            server_name
+            for server_name in server_names
+            if not any(t["name"].startswith(f"{server_name}_") for t in tools)
+        ]
 
     def get_available_tools(self) -> List[Dict[str, Any]]:
         """Get list of available tools from the MCP server."""
