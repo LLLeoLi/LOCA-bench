@@ -11,6 +11,7 @@ Based on python_execute MCP server but with programmatic tool calling support.
 
 import os
 import sys
+import csv
 import time
 import uuid
 import json
@@ -43,6 +44,51 @@ app = FastMCP("Programmatic Tool Calling Server")
 
 # Default workspace (can be overridden by environment variable)
 DEFAULT_WORKSPACE = "."
+
+# Model-facing description for the code_execution tool. This is what the agent
+# sees, so it must match the tool's actual behavior. Execution is handled by
+# ProgrammaticToolCallingTool (see helper.py) in a persistent IPython kernel
+# (StatefulSandbox, vendored from verl for training-side alignment), NOT by
+# this server's code_execution body: tools are called via the `tools["name"](...)`
+# mapping and return native Python values, variables/imports persist across calls,
+# and the result to the model is the kernel output (stdout + last-expression echo,
+# stderr under a [stderr]: header, IPython traceback on error). The text below is
+# byte-identical to verl's PTC_TOOL_DESCRIPTION_RICH.
+PTC_TOOL_DESCRIPTION_RICH = (
+    'Run Python that calls the tools listed above as `tools["tool_name"](*args, **kwargs)`. State (variables, imports) persists across calls. Use print() to see output.\n'
+    "USE WHEN: loops, conditionals, error handling, or chaining multiple tool calls with intermediate processing.\n\n"
+    "Notes:\n"
+    "- Code runs in the workspace directory and file writes are restricted to it, don't write to `/tmp`; always use absolute paths for file writes; os, json, csv, sys are pre-imported.\n"
+    "- Tools return native Python values; the type and structure vary by tool (e.g. dict, list, or str). Always print and inspect the first result before processing many items; do not assume a result is a list and loop over it.\n"
+    "- Very large printed output is truncated; print summaries rather than large raw data.\n"
+    "- Tools may raise an exception; wrap calls in try/except to handle failures.\n"
+    "Usage examples:\n\n"
+    "Batch + conditional workflow:\n"
+    "```python\n"
+    "print(type(tools[\"get_info\"](id='A001')))  # inspect return type first, then loop\n"
+    "results = []\n"
+    "for item in ['A001', 'A002', 'A003']:\n"
+    "    info = tools[\"get_info\"](id=item)\n"
+    "    if info.get('status') == 'active': # info is a dict, confirmed above\n"
+    "        results.append(tools[\"get_details\"](id=item))\n"
+    "    else:\n"
+    "        print(f'Skipping {item}')\n"
+    "    print(f'Processed {item}')\n"
+    "print('Collected', len(results))\n"
+    "```\n\n"
+    "Error handling:\n"
+    "```python\n"
+    "ok, failed = [], []\n"
+    "for item_id in ['A001', 'A002', 'A003']:\n"
+    "    try:\n"
+    "        r = tools[\"get_info\"](id=item_id)\n"
+    "        ok.append(r)\n"
+    "    except Exception as e:\n"
+    "        failed.append((item_id, str(e)))\n"
+    "    print(f'{len(ok)} ok, {len(failed)} failed')\n"
+    "print('Failed:', failed[:3] if failed else 'none')\n"
+    "```"
+)
 
 # Global tool executor - will be set by the tool that creates this server
 _tool_executor: Optional[Callable[[str, Dict[str, Any]], tuple]] = None
@@ -83,9 +129,24 @@ class ToolCallInterceptor:
         self.tool_results_cache = tool_results_cache or {}
 
     def __getattr__(self, tool_name: str):
-        """Intercept any attribute access as a potential tool call."""
-        def tool_function(**kwargs):
-            """Record the tool call and return cached result if available."""
+        """Intercept attribute access as a tool call: ``tools.tool_name(...)``."""
+        return self._make_tool_function(tool_name)
+
+    def __getitem__(self, tool_name: str):
+        """Intercept subscript access as a tool call: ``tools["tool_name"](...)``."""
+        return self._make_tool_function(tool_name)
+
+    def _make_tool_function(self, tool_name: str):
+        """Build the callable that records/returns the result for one tool name."""
+        def tool_function(*args, **kwargs):
+            """Record the tool call and return its cached native result if available."""
+            if args:
+                # MCP tools take named parameters; positional args cannot be mapped.
+                raise TypeError(
+                    f"tools[{tool_name!r}] must be called with keyword arguments, "
+                    f"e.g. tools[{tool_name!r}](id='A001')"
+                )
+
             # Generate a deterministic cache key based on tool name and args
             # This ensures the same call gets the same result across passes
             import json
@@ -104,105 +165,97 @@ class ToolCallInterceptor:
 
             # Check if we have a cached result for this call
             if tool_call_id in self.tool_results_cache:
-                observation = self.tool_results_cache[tool_call_id]
-                has_error = False
-            else:
-                # First pass - return a placeholder
-                # This will trigger re-execution after tools are actually run
-                observation = f"__TOOL_CALL_PENDING_{tool_call_id}__"
-                has_error = False
+                raw = self.tool_results_cache[tool_call_id]
+                # Record the (non-pending) result before decoding so a decode that
+                # raises (tool errored) still leaves this call marked as resolved.
+                self.tool_results.append({
+                    "tool_call_id": tool_call_id,
+                    "observation": raw,
+                    "has_error": False,
+                })
+                return self._decode_cached(raw)
 
-            # Record the result
+            # First pass - return a placeholder.
+            # This will trigger re-execution after tools are actually run.
+            observation = f"__TOOL_CALL_PENDING_{tool_call_id}__"
             self.tool_results.append({
                 "tool_call_id": tool_call_id,
                 "observation": observation,
-                "has_error": has_error,
+                "has_error": False,
             })
-
             return observation
 
         return tool_function
 
+    @staticmethod
+    def _decode_cached(raw: str):
+        """Turn a cached tool result into the native value user code receives.
 
-@app.tool()
+        The parent process caches results in the wire envelope
+        ``{"__ptc__": true, "ok": bool, "value": <raw tool output text>}``.
+        - ``ok=False`` -> raise ``RuntimeError(value)`` so code can ``try/except``.
+        - ``ok=True``  -> return the payload as a native Python value: ``json.loads``
+          the text when it is JSON (dict/list/number/...), otherwise the raw string.
+        Values that are not in the envelope form are returned as-is (best-effort
+        JSON-decoded), keeping backward compatibility.
+        """
+        import json
+        try:
+            env = json.loads(raw)
+        except (ValueError, TypeError):
+            env = None
+
+        if isinstance(env, dict) and env.get("__ptc__") is True:
+            value = env.get("value", "")
+            if not env.get("ok", True):
+                raise RuntimeError(value if isinstance(value, str) else str(value))
+            if isinstance(value, str):
+                try:
+                    return json.loads(value)
+                except (ValueError, TypeError):
+                    return value
+            return value
+
+        # Fallback: treat the raw string as the value itself.
+        try:
+            return json.loads(raw)
+        except (ValueError, TypeError):
+            return raw
+
+
+@app.tool(description=PTC_TOOL_DESCRIPTION_RICH)
 def code_execution(
-    code: Annotated[str, "Python code to execute that may include tool calls as function invocations"],
-    filename: Annotated[Optional[str], "Filename for the Python file (including .py extension). If not provided, a random UUID will be used."] = None,
-    timeout: Annotated[Optional[int], "Maximum execution time in seconds. Cannot exceed 120 seconds. Default is 30 seconds."] = 30,
-    tool_results_cache: Annotated[Optional[Dict[str, str]], "Pre-computed tool results from previous execution pass. Format: {tool_call_id: observation}"] = None,
-    _tools_available: Annotated[Optional[List[str]], "List of tool names that are available for calling (optional, for documentation)"] = None
+    code: Annotated[str, 'Python code. Use tools["func_name"](*args, **kwargs) to call env tools.'],
 ) -> str:
-    """
-    Execute Python code that can programmatically call other tools within loops, conditionals, and complex logic.
+    """Execute Python code that can call other tools via the ``tools`` mapping.
 
-    USE THIS WHEN YOU NEED TO:
-    - Process multiple items in a loop (e.g., read/process all files in a directory)
-    - Make decisions with if/else based on tool results (e.g., check if file exists, then read or create)
-    - Chain multiple tool calls with intermediate processing (e.g., read data, transform it, write results)
-    - Implement complex workflows that require computation between tool calls
+    The model-facing description is ``PTC_TOOL_DESCRIPTION_RICH`` (passed to
+    ``@app.tool``). This docstring is for maintainers only.
 
-    DO NOT USE THIS FOR:
-    - Single simple tool calls (just call the tool directly instead)
-    - Linear workflows without loops or conditions
+    The signature exposes only ``code`` so the FastMCP-generated inputSchema
+    matches the verl training-side programmatic_tool_call tool exactly (the
+    parent-process wrapper additionally hard-overrides the parameters block in
+    get_tool_function, see helper._CODE_EXECUTION_PARAMETERS).
 
-    HOW TO USE:
-    Write Python code that calls tools via the 'tools' object:
-
-    Example 1 - Batch processing:
-        files = tools.filesystem_list_directory(path=".")
-        for file in files:
-            if file.endswith('.txt'):
-                content = tools.filesystem_read_file(path=file)
-                processed = content.upper()
-                tools.filesystem_write_file(path=f"processed_{file}", content=processed)
-        result = "Batch processing complete"
-
-    Example 2 - Conditional workflow:
-        entities = tools.memory_search_nodes(query="user_status")
-        if len(entities) == 0:
-            tools.memory_create_entities(entities=[{"name": "status", "entityType": "config"}])
-        result = "Status initialized"
-
-    The code executes normally, and all tool calls return real results (not placeholders).
-    Use 'result' variable to return a final value. Use print() for debugging output.
+    In normal LOCA-Bench runs this body never executes:
+    ``ProgrammaticToolCallingTool`` intercepts code_execution and runs the code
+    in a persistent IPython kernel (see helper.py). The body is kept as a
+    standalone fallback (e.g. running this server directly) and still returns
+    the full structured JSON described below.
 
     Args:
-        code: Python code to execute that may include tool calls via 'tools' object
-        filename: Optional filename for the Python file
-        timeout: Maximum execution time in seconds (max 120)
-        tool_results_cache: Internal parameter for multi-pass execution (do not use)
-        _tools_available: Internal parameter for documentation (do not use)
+        code: Python code to execute; tool calls go through the injected ``tools`` mapping.
 
     Returns:
-        JSON string with execution results. The following fields are visible to you:
-        {
-            "success": bool,                    // Whether execution succeeded without errors
-            "execution_time_seconds": float,    // Time taken to execute (seconds)
-            "timeout_limit_seconds": int,       // Timeout limit that was applied
-            "stdout": str | null,               // Captured standard output (from print statements)
-            "stderr": str | null,               // Captured standard error
-            "return_value": str | null,         // Value of 'result' variable if defined in code
-            "error": {                          // Error details if execution failed
-                "type": str,                    // Exception type name
-                "message": str,                 // Error message
-                "traceback": str                // Full traceback
-            } | null
-        }
-
-        Note: Internal fields like "tool_calls", "tool_results", "file_path", and "needs_tool_execution"
-        are filtered out and not visible to you. They are used internally for multi-pass execution.
+        JSON string with keys: success, execution_time_seconds, timeout_limit_seconds,
+        stdout, stderr, return_value, error, plus the internal fields tool_calls,
+        tool_results, needs_tool_execution, file_path.
     """
+    tool_results_cache: Optional[Dict[str, str]] = None
 
     try:
-        # Ensure timeout is reasonable
-        if timeout is None:
-            timeout = 30
-        if timeout > 120:
-            timeout = 120
-
-        # Generate filename if not provided
-        if filename is None:
-            filename = f"programmatic_{uuid.uuid4().hex[:8]}.py"
+        timeout = 30
+        filename = f"programmatic_{uuid.uuid4().hex[:8]}.py"
 
         # Ensure filename ends with .py
         if not filename.endswith(".py"):
@@ -224,12 +277,39 @@ def code_execution(
         # Create tool interceptor with cache
         interceptor = ToolCallInterceptor(tool_results_cache)
 
-        # Prepare execution environment
+        # Prepare execution environment. os/json/csv/sys are pre-imported to match
+        # the tool description so the model can use them without an import line.
+        # A guarded open() confines write-mode file access to the workspace,
+        # matching the StatefulSandbox guard used on the normal execution path.
+        # This body runs in-process, so instead of chdir'ing the whole server we
+        # resolve relative paths against the workspace explicitly (the real
+        # kernel chdir's into it, so relative paths must behave the same here).
+        _orig_open = open
+        _write_modes = frozenset('wax+')
+        _ws_real = os.path.realpath(agent_workspace)
+
+        def _guarded_open(file, mode='r', *args, **kwargs):
+            _target = str(file)
+            if not os.path.isabs(_target):
+                _target = os.path.join(_ws_real, _target)
+            _abs = os.path.realpath(_target)
+            if _write_modes & set(str(mode)):
+                if not (_abs.startswith(_ws_real + os.sep) or _abs == _ws_real):
+                    raise PermissionError(
+                        f"Write denied: {file!r} is outside the agent workspace {_ws_real!r}."
+                    )
+            return _orig_open(_abs, mode, *args, **kwargs)
+
         exec_globals = {
             "__name__": "__main__",
             "__file__": file_path,
             "tools": interceptor,  # Inject the tool interceptor
             "WORKSPACE": agent_workspace,  # Provide workspace path for file operations
+            "os": os,
+            "sys": sys,
+            "json": json,
+            "csv": csv,
+            "open": _guarded_open,
         }
 
         # Capture stdout and stderr

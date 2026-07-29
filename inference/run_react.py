@@ -270,6 +270,7 @@ def make_aihubmix_api_request(
     temperature: float = 1.0,
     top_p: float = 1.0,
     max_tokens: int = 4096,
+    request_timeout: int = 600,
     max_context_size: Optional[int] = None,
     context_awareness: bool = False,
     reasoning_effort: Optional[str] = None,
@@ -625,7 +626,7 @@ def make_aihubmix_api_request(
                 aihubmix_api_url,
                 headers=headers,
                 json=json_data,
-                timeout=60
+                timeout=request_timeout
             )
             if verbose:
                 print(f"Response status: {response.status_code}")
@@ -1310,6 +1311,7 @@ def run_single_task(
                 temperature=1.0,
                 top_p=1.0,
                 max_tokens=max_tokens,
+                request_timeout=timeout,
                 max_context_size=max_context_size,
                 context_awareness=context_awareness,
                 reasoning_effort=reasoning_effort,
@@ -1767,6 +1769,7 @@ def run_single_task(
                         temperature=0.7,
                         top_p=1.0,
                         max_tokens=max_tokens,
+                        request_timeout=timeout,
                         max_context_size=max_context_size,
                         context_awareness=context_awareness,
                         reasoning_effort=reasoning_effort,

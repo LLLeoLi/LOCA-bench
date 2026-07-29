@@ -39,16 +39,60 @@ if str(gem_root) not in sys.path:
 
 from fastmcp import FastMCP
 
+from gem.tools.mcp_server.bwrap_confine import bwrap_usable, build_bwrap_argv
+
 # Create FastMCP server
 app = FastMCP("Python Execute Server")
 
 # Default workspace (can be overridden by environment variable)
 DEFAULT_WORKSPACE = "."
 
+# Appended when output contains a bwrap EROFS denial, to steer the model back
+# into the writable workspace instead of retrying the same out-of-bounds path.
+_ROFS_HINT = (
+    "A 'Read-only file system' error means the write target is OUTSIDE the agent "
+    "workspace. Writes are confined to the workspace: {workspace} (and its "
+    "subdirectories). Use a path inside it -- relative paths already resolve there."
+)
+
 
 def get_workspace() -> str:
     """Get the workspace directory from environment or use default."""
     return os.environ.get("PYTHON_EXECUTE_WORKSPACE", DEFAULT_WORKSPACE)
+
+
+def _build_write_guard_preamble(workspace_path: str) -> str:
+    """Return a single line of code that confines file writes to ``workspace_path``.
+
+    Prepended to the model's code before it runs in the ``uv run`` subprocess.
+    Installs a ``builtins.open`` wrapper that denies write-mode opens whose
+    realpath is outside the workspace, and chdir's into the workspace so
+    relative paths resolve there. This matches the Python-level guard the
+    programmatic_tool_calling StatefulSandbox already applies (same
+    PermissionError semantics); like that guard it only covers ``open()``, not
+    ``os.open``/``subprocess``/``shutil``.
+
+    The guard body is emitted as one physical line (an ``exec`` of a source
+    string) so it shifts user-code line numbers in tracebacks by exactly one.
+    """
+    guard_src = (
+        "import os as _os, builtins as _bi\n"
+        f"_ws_real = _os.path.realpath({workspace_path!r})\n"
+        "_orig_open = _bi.open\n"
+        "_write_modes = frozenset('wax+')\n"
+        "def _guarded_open(file, mode='r', *args, **kwargs):\n"
+        "    if _write_modes & set(str(mode)):\n"
+        "        _abs = _os.path.realpath(str(file))\n"
+        "        if not (_abs.startswith(_ws_real + _os.sep) or _abs == _ws_real):\n"
+        "            raise PermissionError(f'Write denied: {file!r} is outside the agent workspace {_ws_real!r}.')\n"
+        "    return _orig_open(file, mode, *args, **kwargs)\n"
+        "_bi.open = _guarded_open\n"
+        "try:\n"
+        "    _os.chdir(_ws_real)\n"
+        "except OSError:\n"
+        "    pass\n"
+    )
+    return f"exec(compile({guard_src!r}, '<loca_write_guard>', 'exec'))\n"
 
 
 @app.tool()
@@ -57,7 +101,7 @@ def python_execute(
     filename: Annotated[Optional[str], "Filename for the Python file (including .py extension). If not provided, a random UUID will be used."] = None,
     timeout: Annotated[Optional[int], "Maximum execution time in seconds. Cannot exceed 120 seconds. If a value greater than 120 is provided, it will be automatically limited to 120 seconds. Default is 30 seconds."] = 30
 ) -> str:
-    """Execute Python code directly under the agent workspace, and returns stdout, stderr, return code, and execution time in a structured format."""
+    """Execute Python code directly under the agent workspace, and returns stdout, stderr, return code, and execution time in a structured format. This runs an isolated script and CANNOT access MCP tools (there is no `tools` object); to call env tools, use code_execution instead."""
     try:
         # Use provided filename or generate random UUID
         if filename is None:
@@ -81,24 +125,40 @@ def python_execute(
         tmp_dir = os.path.join(agent_workspace, '.python_tmp')
         os.makedirs(tmp_dir, exist_ok=True)
 
-        # Create Python file
+        # Create Python file. A write-guard preamble is prepended so file
+        # writes from the model's code are confined to the workspace (parity
+        # with the programmatic_tool_calling sandbox guard).
         file_path = os.path.join(tmp_dir, filename)
+        guarded_code = _build_write_guard_preamble(agent_workspace) + code
         with open(file_path, 'w', encoding='utf-8') as f:
-            f.write(code)
+            f.write(guarded_code)
 
         # Record start time
         start_time = time.time()
 
-        # Execute Python file
-        cmd = f"uv run --directory {agent_workspace} ./.python_tmp/{filename}"
+        # Execute Python file. When bwrap is usable it is the real
+        # write-confinement layer: the uv-run subprocess (and anything it
+        # spawns, and any os/pathlib/subprocess writes in the model's code) can
+        # only write inside the workspace. bwrap --chdir's into the workspace and
+        # sets HOME there, so uv's cache stays writable. Without bwrap we fall
+        # back to the open()-guard preamble prepended above.
+        rel_script = f"./.python_tmp/{filename}"
+        uv_argv = ["uv", "run", "--directory", agent_workspace, rel_script]
+        use_bwrap = bwrap_usable()
+        if use_bwrap:
+            argv = build_bwrap_argv(agent_workspace) + uv_argv
+            run_kwargs = dict(shell=False)
+        else:
+            argv = f"uv run --directory {agent_workspace} {rel_script}"
+            run_kwargs = dict(shell=True)
         try:
             result = subprocess.run(
-                cmd,
-                shell=True,
+                argv,
                 capture_output=True,
                 text=True,
                 encoding='utf-8',
-                timeout=timeout
+                timeout=timeout,
+                **run_kwargs,
             )
         except subprocess.TimeoutExpired:
             execution_time = time.time() - start_time
@@ -129,7 +189,15 @@ def python_execute(
         # If no output at all
         if not result.stdout and not result.stderr:
             output_parts.insert(0, "No console output produced.")
-        
+
+        # bwrap denies writes outside the workspace with a bare EROFS ("Read-only
+        # file system"), which reads like a disk problem rather than a policy.
+        # Append a hint so the model retries into the workspace instead of
+        # treating it as a transient error.
+        if "Read-only file system" in (result.stderr or ""):
+            output_parts.append("=== HINT ===")
+            output_parts.append(_ROFS_HINT.format(workspace=agent_workspace))
+
         return "\n".join(output_parts)
         
     except Exception as e:

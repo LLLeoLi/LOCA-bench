@@ -21,13 +21,20 @@ def nfs_safe_rmtree(path: str) -> None:
     def onerror(func, path, exc_info):
         """Error handler for shutil.rmtree that ignores NFS-related errors."""
         exc_type, exc_value, _ = exc_info
-        # Ignore "Device or resource busy" (EBUSY) - NFS silly rename
-        # Ignore "Directory not empty" (ENOTEMPTY) - caused by .nfs* files
-        if isinstance(exc_value, OSError) and exc_value.errno in (errno.EBUSY, errno.ENOTEMPTY):
-            # Check if it's a .nfs* file (NFS silly rename)
-            basename = os.path.basename(path)
-            if basename.startswith('.nfs') or exc_value.errno == errno.ENOTEMPTY:
+        if isinstance(exc_value, OSError):
+            # Ignore "No such file or directory" (ENOENT) - the target is
+            # already gone, which is the desired outcome for a delete. This
+            # happens under concurrent access or NFS races between scandir
+            # and rmdir/unlink.
+            if exc_value.errno == errno.ENOENT:
                 return  # Silently ignore
+            # Ignore "Device or resource busy" (EBUSY) - NFS silly rename
+            # Ignore "Directory not empty" (ENOTEMPTY) - caused by .nfs* files
+            if exc_value.errno in (errno.EBUSY, errno.ENOTEMPTY):
+                # Check if it's a .nfs* file (NFS silly rename)
+                basename = os.path.basename(path)
+                if basename.startswith('.nfs') or exc_value.errno == errno.ENOTEMPTY:
+                    return  # Silently ignore
         # Re-raise other errors
         raise exc_value
     
