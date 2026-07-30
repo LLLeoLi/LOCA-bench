@@ -22,6 +22,8 @@ parameters:
     description: "Override server script path (for testing)"
 
 workspace:
+  # storage_download_file accepts a model-controlled destination path; confine writes.
+  confine_writes: true
   set_cwd: false
   supports_placeholders: true
   mkdir_if_needed: true

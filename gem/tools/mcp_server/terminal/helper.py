@@ -136,7 +136,18 @@ def get_terminal_stdio_config(
     # Add additional environment variables if specified
     if env_vars:
         config[server_name]["env"].update(env_vars)
-    
+
+    # cli-mcp-server's own path validation is bypassable (program strings for
+    # python/awk/sed are not treated as paths), so confine the server process
+    # tree to the workspace with bwrap — same policy as terminal.yaml's
+    # workspace.confine_writes handled by config_loader.
+    from gem.tools.mcp_server.config_loader import _loader
+
+    entry = config[server_name]
+    entry["command"], entry["args"], entry["env"] = _loader._apply_write_confinement(
+        entry["command"], entry["args"], entry["env"], abs_allowed_dir
+    )
+
     return config
 
 

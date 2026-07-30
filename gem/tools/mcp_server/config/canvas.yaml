@@ -30,6 +30,8 @@ parameters:
     description: "Override server script path (for testing)"
 
 workspace:
+  # Defense-in-depth: confine all writes to the task workspace.
+  confine_writes: true
   set_cwd: false
   supports_placeholders: true
   mkdir_if_needed: true

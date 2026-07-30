@@ -93,3 +93,7 @@ workspace:
   cwd_param: allowed_dir
   supports_placeholders: true
   mkdir_if_needed: true
+  # cli-mcp-server's own path validation is bypassable (program strings passed
+  # to python/awk/sed are not treated as paths), so confine the whole server
+  # process tree to the workspace with bwrap.
+  confine_writes: true

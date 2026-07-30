@@ -99,6 +99,38 @@ class ServerConfigLoader:
         # Determine working directory
         cwd = self._determine_cwd(config, params)
 
+        # OS-level write confinement (opt-in per server via workspace.confine_writes).
+        # Needed for servers that execute model-controlled code/commands or accept
+        # model-controlled output paths without validating them themselves (e.g.
+        # cli-mcp-server lets `python -c`/`awk` program strings through its path
+        # checks). Wrapping the server process in bwrap confines every write it or
+        # its children make to the workspace, no matter how the write is issued.
+        #
+        # The confinement root doubles as the process cwd, so it must stay the
+        # server's own cwd; the task workspace and agent workspace are bound
+        # writable alongside it, since a server's legitimate targets can sit in
+        # a sibling directory (pdf_tools' tempfile_dir, the local_db data dirs).
+        if config.get("workspace", {}).get("confine_writes", False):
+            task_ws = params.get("task_workspace")
+            agent_ws = params.get("agent_workspace")
+            confine_root = cwd or task_ws or agent_ws
+            if confine_root:
+                also_writable = [
+                    str(Path(p).resolve())
+                    for p in (task_ws, agent_ws)
+                    if p
+                ]
+                command, args, env = self._apply_write_confinement(
+                    command, args, env, str(Path(confine_root).resolve()), also_writable
+                )
+            else:
+                warnings.warn(
+                    f"confine_writes set for server '{actual_server_name}' but no "
+                    "workspace root could be determined (no cwd/task_workspace/"
+                    "agent_workspace); launching WITHOUT write confinement.",
+                    RuntimeWarning,
+                )
+
         # Build stdio config
         stdio_config = {
             "command": command,
@@ -112,6 +144,101 @@ class ServerConfigLoader:
             stdio_config["cwd"] = cwd
 
         return {actual_server_name: stdio_config}
+
+    _uv_cache_dir_cached: Optional[str] = None
+
+    @classmethod
+    def _uv_cache_dir(cls) -> Optional[str]:
+        """Effective uv cache directory, as uv itself resolves it.
+
+        uv's cache location comes from a chain of sources (UV_CACHE_DIR,
+        XDG_CACHE_HOME, uv.toml, HOME); asking uv is the only robust way to
+        find the directory the confined server would actually use.
+        """
+        if cls._uv_cache_dir_cached is None:
+            import subprocess
+
+            try:
+                result = subprocess.run(
+                    ["uv", "cache", "dir"],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                cls._uv_cache_dir_cached = (
+                    result.stdout.strip() if result.returncode == 0 else ""
+                )
+            except (OSError, subprocess.SubprocessError):
+                cls._uv_cache_dir_cached = ""
+        return cls._uv_cache_dir_cached or None
+
+    @staticmethod
+    def _load_bwrap_confine():
+        """Import bwrap_confine without importing the gem.tools package.
+
+        Importing ``gem.tools`` runs its ``__init__`` chain (mcp_tool), which is
+        unsafe from MCP server subprocesses; loading by file path works in every
+        context this loader runs in.
+        """
+        import importlib.util
+
+        path = Path(__file__).parent / "bwrap_confine.py"
+        spec = importlib.util.spec_from_file_location("bwrap_confine", str(path))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def _apply_write_confinement(
+        self,
+        command: str,
+        args: List[str],
+        env: Dict[str, str],
+        cwd: str,
+        also_writable: Optional[List[str]] = None,
+    ) -> tuple[str, List[str], Dict[str, str]]:
+        """Wrap the server launch in bwrap so it can only write inside ``cwd``.
+
+        ``also_writable`` paths are bound writable too (the task/agent
+        workspaces), while ``cwd`` stays the process working directory.
+
+        The whole filesystem stays readable; writes outside these paths fail
+        with EROFS at the kernel level for the server process AND everything it
+        spawns. Falls back (with a warning) to the unconfined launch when bwrap
+        cannot create namespaces on this host.
+        """
+        bwrap = self._load_bwrap_confine()
+        if not bwrap.bwrap_usable():
+            warnings.warn(
+                "confine_writes requested but bwrap is unusable on this host; "
+                "the server will run WITHOUT OS-level write confinement.",
+                RuntimeWarning,
+            )
+            return command, args, env
+
+        env = dict(env or {})
+        write_paths_extra = []
+        for path in also_writable or []:
+            if path and path != cwd:
+                os.makedirs(path, exist_ok=True)
+                write_paths_extra.append(path)
+        if command in ("uv", "uvx"):
+            # uv needs write access to its cache even for a fully synced
+            # `uv run` (lock files under the cache dir), and bwrap remaps HOME
+            # into the workspace, which would otherwise send the cache there
+            # (cold resolve + downloads per launch). Pin the effective cache
+            # dir and bind it writable.
+            cache_dir = self._uv_cache_dir()
+            if cache_dir:
+                os.makedirs(cache_dir, exist_ok=True)
+                write_paths_extra.append(cache_dir)
+                env.setdefault("UV_CACHE_DIR", cache_dir)
+            python_install_dir = os.environ.get("UV_PYTHON_INSTALL_DIR")
+            if python_install_dir:
+                env.setdefault("UV_PYTHON_INSTALL_DIR", python_install_dir)
+
+        argv = bwrap.build_bwrap_argv(cwd, write_paths_extra=write_paths_extra)
+        argv += [command] + args
+        return argv[0], argv[1:], env
 
     def _build_command(
         self, config: Dict[str, Any], params: Dict[str, Any]

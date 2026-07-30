@@ -31,6 +31,8 @@ parameters:
     description: "Override server script path (for testing)"
 
 workspace:
+  # export_emails accepts a model-controlled export_path; confine writes.
+  confine_writes: true
   set_cwd: false
   supports_placeholders: true
   mkdir_if_needed: true

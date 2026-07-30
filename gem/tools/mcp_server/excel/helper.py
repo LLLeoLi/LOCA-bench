@@ -58,13 +58,16 @@ def get_excel_stdio_config(
         # Create combined tool
         tool = MCPTool(merged_config, validate_on_init=False)
     """
-    # Use excel-mcp-server directly (installed via uv pip install)
-    # Reference: https://github.com/haris-musa/excel-mcp-server
-    # Set cwd so that relative paths in Excel operations are resolved correctly
+    # Launch through run_confined.py instead of the upstream `excel-mcp-server`
+    # console script: in stdio mode upstream ignores EXCEL_FILES_PATH entirely
+    # (absolute paths accepted as-is => writes anywhere on the filesystem). The
+    # wrapper re-enables the containment check and keeps the server's file log
+    # inside the workspace. Reference: https://github.com/haris-musa/excel-mcp-server
+    run_confined = str(Path(__file__).parent / "run_confined.py")
     config = {
         server_name: {
-            "command": "excel-mcp-server",
-            "args": ["stdio"]
+            "command": "python",
+            "args": [run_confined]
         }
     }
 

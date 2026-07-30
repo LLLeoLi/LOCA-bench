@@ -72,6 +72,13 @@ from inference.common.trajectory_schema import (
 
 load_dotenv()
 
+# Claude Agent SDK built-in tools that can write to the host filesystem (or run
+# arbitrary shell). They are outside the benchmark's MCP tool surface and are
+# not confined to the agent workspace, so they are removed from the agent
+# entirely (see ClaudeAgentOptions.disallowed_tools) and denied again by the
+# PreToolUse hook as defense-in-depth.
+BUILTIN_WRITE_TOOLS = ("Bash", "Write", "Edit", "MultiEdit", "NotebookEdit")
+
 
 def setup_mcp_servers(
     mcp_configs: Dict[str, Any],
@@ -373,10 +380,24 @@ async def run_claude_agent_async(
         tool_use_id: str | None,  # noqa: ARG001
         context: HookContext  # noqa: ARG001
     ) -> SyncHookJSONOutput:
-        """Hook callback for PreToolUse events - logs tool calls."""
+        """Hook callback for PreToolUse events - logs tool calls and denies
+        built-in write tools (defense-in-depth behind disallowed_tools)."""
         tool_name = hook_input.get("tool_name", "unknown")
         print(f"[{task_label}] 🔧 Tool: {tool_name}")
-        return {}  # Allow all tools
+        if tool_name in BUILTIN_WRITE_TOOLS:
+            print(f"[{task_label}] ⛔ Denied built-in write tool: {tool_name}")
+            return {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": (
+                        f"The built-in {tool_name} tool is disabled in this benchmark. "
+                        "Use the provided MCP tools instead; file writes are only "
+                        "allowed inside the agent workspace."
+                    ),
+                }
+            }
+        return {}  # Allow all other tools
 
     # Create PreCompact hook callback to track compaction events
     async def on_pre_compact(
@@ -433,10 +454,16 @@ async def run_claude_agent_async(
     step_count = 0
     # Run Claude Agent with MCP tools and hooks
     # Use ClaudeSDKClient instead of query() to enable hooks (hooks require streaming mode)
+    # bypassPermissions would otherwise leave the SDK's built-in filesystem /
+    # shell tools fully unrestricted (writes anywhere on the host). The task
+    # tool surface is the MCP servers, so remove the built-in write tools
+    # entirely; the PreToolUse hook above denies them again if they slip
+    # through (e.g. inside a subagent).
     options = ClaudeAgentOptions(
         mcp_servers=mcp_servers,
         cwd=str(agent_workspace),
         allowed_tools=allowed_tools,
+        disallowed_tools=list(BUILTIN_WRITE_TOOLS),
         permission_mode="bypassPermissions",
         hooks=hooks_config,
     )

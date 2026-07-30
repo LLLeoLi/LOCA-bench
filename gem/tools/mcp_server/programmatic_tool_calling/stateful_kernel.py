@@ -38,7 +38,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Sequence
 
 from gem.tools.mcp_server.bwrap_confine import bwrap_usable, build_bwrap_argv
 
@@ -262,8 +262,15 @@ class StatefulSandbox:
         mem_limit_bytes: Optional[int] = None,
         interrupt_grace_seconds: float = 2.0,
         max_output_chars: Optional[int] = None,
+        extra_bind_paths: Sequence[str] = (),
     ):
         self.workspace_path = workspace_path
+        # Host paths that must stay visible AND writable inside the bwrap
+        # sandbox. Divergence from verl's sandbox: the eval-side `tools` proxy
+        # reaches the MCP clients over a unix socket in the parent process, and
+        # bwrap mounts a private tmpfs over /tmp, so the socket's directory has
+        # to be bound explicitly or the kernel cannot see it at all.
+        self.extra_bind_paths = list(extra_bind_paths)
         self.max_output_chars = (
             max_output_chars if max_output_chars is not None else _DEFAULT_MAX_OUTPUT_CHARS
         )
@@ -327,7 +334,8 @@ class StatefulSandbox:
         if self._use_bwrap:
             kernel_cmd = (
                 build_bwrap_argv(
-                    self.workspace_path, write_paths_extra=[self._tmpdir]
+                    self.workspace_path,
+                    write_paths_extra=[self._tmpdir] + self.extra_bind_paths,
                 )
                 + kernel_cmd
             )

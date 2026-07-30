@@ -27,6 +27,8 @@ parameters:
     description: "Optional dictionary of additional environment variables to set"
 
 workspace:
+  # External package; output-path validation unverified, confine writes.
+  confine_writes: true
   set_cwd: true
   cwd_param: workspace_path
   supports_placeholders: true

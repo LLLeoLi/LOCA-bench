@@ -30,11 +30,11 @@ from typing import Optional, Dict, Any, Tuple, List
 from gem.tools.mcp_tool import MCPTool
 from gem.tools.mcp_server.programmatic_tool_calling.stateful_kernel import StatefulSandbox
 
-# Per-execute() timeout of the PTC kernel (seconds). Raised to 60s so
-# I/O-heavy code and bulk tool-call loops have room to finish before the
-# kernel is killed (python_execute allows up to 120s). Model code cannot
-# override it; configure via the ptc_timeout kwarg or LOCA_PTC_TIMEOUT.
-_DEFAULT_PTC_TIMEOUT = float(os.getenv("LOCA_PTC_TIMEOUT", "60.0"))
+# Per-execute() timeout of the PTC kernel (seconds). 120s matches the ceiling
+# python_execute allows, so I/O-heavy code and bulk tool-call loops have room
+# to finish before the kernel is killed. Model code cannot override it;
+# configure via the ptc_timeout kwarg or LOCA_PTC_TIMEOUT.
+_DEFAULT_PTC_TIMEOUT = float(os.getenv("LOCA_PTC_TIMEOUT", "120.0"))
 
 # Wall-clock budget for the one-shot setup code (tools proxy injection).
 # Matches verl's _SANDBOX_SETUP_TIMEOUT.
@@ -233,7 +233,7 @@ class ProgrammaticToolCallingTool(MCPTool):
                    Can be set later using set_tools().
             validate_on_init: Whether to validate connection on initialization
             ptc_timeout: Per-execute() timeout (seconds) of the PTC kernel.
-                         Defaults to LOCA_PTC_TIMEOUT or 60.0.
+                         Defaults to LOCA_PTC_TIMEOUT or 120.0.
             **kwargs: Additional arguments to pass to MCPTool constructor
         """
         super().__init__(config, validate_on_init=validate_on_init, **kwargs)
@@ -568,20 +568,33 @@ class ProgrammaticToolCallingTool(MCPTool):
             if self._sandbox_failed is not None:
                 return None, self._sandbox_failed
 
+            # The bridge socket must exist before the kernel starts: the kernel
+            # runs under bwrap, which mounts a private tmpfs over /tmp, so its
+            # directory has to be bind-mounted in explicitly (extra_bind_paths)
+            # or `tools[...]` calls fail with FileNotFoundError on connect().
+            try:
+                self._bridge_dir = tempfile.mkdtemp(prefix="ptc_bridge_")
+                sock_path = os.path.join(self._bridge_dir, "tools.sock")
+                self._bridge = _ToolBridge(self._bridge_dispatch, sock_path)
+            except Exception as e:
+                self._teardown_bridge_locked()
+                self._sandbox_failed = f"[Error] PTC tool bridge failed to start: {e}"
+                return None, self._sandbox_failed
+
             try:
                 sandbox = StatefulSandbox(
-                    workspace_path=self._get_workspace(), timeout=self._ptc_timeout
+                    workspace_path=self._get_workspace(),
+                    timeout=self._ptc_timeout,
+                    extra_bind_paths=[self._bridge_dir],
                 )
                 sandbox.start()
             except Exception as e:
+                self._teardown_bridge_locked()
                 self._sandbox_failed = f"[Error] PTC sandbox failed to start: {e}"
                 return None, self._sandbox_failed
 
             try:
                 self._tool_registry = self._build_tool_registry()
-                self._bridge_dir = tempfile.mkdtemp(prefix="ptc_bridge_")
-                sock_path = os.path.join(self._bridge_dir, "tools.sock")
-                self._bridge = _ToolBridge(self._bridge_dispatch, sock_path)
                 setup_code = _PTC_SETUP_TEMPLATE % {
                     "sock_path": sock_path,
                     "tool_names": sorted(self._tool_registry),
