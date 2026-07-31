@@ -17,6 +17,7 @@ class Strategy(str, Enum):
 
     REACT = "react"
     PTC = "ptc"
+    PTC_ONLY = "ptc_only"
     MEMORY_TOOL = "memory_tool"
 
 

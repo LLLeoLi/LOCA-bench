@@ -57,6 +57,19 @@ _CODE_EXECUTION_PARAMETERS = {
     "required": ["code"],
 }
 
+# Opening line of the code_execution description in PTC-only mode, copied
+# verbatim from verl task-sync eval.py PTC_TOOL_DESCRIPTION_ONLY. The full
+# PTC-only description is this line + the RICH description body (everything
+# after the first line of the server-provided description), mirroring verl's
+# construction (opening + PTC_TOOL_DESCRIPTION_RICH.split("\n", 1)[1]) so the
+# two stay byte-identical as long as the RICH text is.
+_PTC_ONLY_DESCRIPTION_OPENING = (
+    'Run Python that calls the tools listed above as `tools["tool_name"](*args, **kwargs)`. '
+    "**This is the ONLY way to invoke env tools** — they cannot be called as standalone tool "
+    "calls, so every env tool must go through this sandbox. "
+    "State (variables, imports) persists across calls. Use print() to see output.\n"
+)
+
 # Kernel-side setup: the `tools` proxy injected into the PTC kernel. Mirrors
 # verl's TOOLS_PROXY_SOURCE -- same class name, same unknown-tool message
 # ("Unknown tool 'x'. Available tools: a, b"), raised at subscript/attribute
@@ -223,6 +236,7 @@ class ProgrammaticToolCallingTool(MCPTool):
         tools: Optional[List[Any]] = None,
         validate_on_init: bool = False,
         ptc_timeout: Optional[float] = None,
+        ptc_only: bool = False,
         **kwargs
     ):
         """Initialize the Programmatic Tool Calling tool.
@@ -234,10 +248,18 @@ class ProgrammaticToolCallingTool(MCPTool):
             validate_on_init: Whether to validate connection on initialization
             ptc_timeout: Per-execute() timeout (seconds) of the PTC kernel.
                          Defaults to LOCA_PTC_TIMEOUT or 120.0.
+            ptc_only: If True, task tools remain visible in the model-facing
+                      schema but direct calls to them are rejected with a
+                      redirect error; only code_execution and claim_done can be
+                      called directly. claim_done is also removed from the
+                      in-kernel ``tools`` proxy so task completion must be
+                      claimed with a direct call (a claim inside code would not
+                      terminate the episode).
             **kwargs: Additional arguments to pass to MCPTool constructor
         """
         super().__init__(config, validate_on_init=validate_on_init, **kwargs)
         self._other_tools = tools or []
+        self._ptc_only = ptc_only
 
         # MCPMark-alignment state (built lazily from discovered tools).
         # LOCA-Bench presents FastMCP multi-server tool names/descriptions
@@ -355,6 +377,15 @@ class ProgrammaticToolCallingTool(MCPTool):
             return True
         return "programmatic_tool_calling" in real_name and "code_execution" in real_name
 
+    @staticmethod
+    def _is_claim_done_tool(real_name: str) -> bool:
+        """True for the claim_done server's tool.
+
+        Bare name with a single server ("claim_done"), FastMCP-prefixed with
+        multiple servers ("claim_done_claim_done").
+        """
+        return real_name == "claim_done" or real_name.endswith("_claim_done")
+
     # ------------------------------------------------------------------
     # PTC kernel (StatefulSandbox) + tool bridge
     # ------------------------------------------------------------------
@@ -389,6 +420,8 @@ class ProgrammaticToolCallingTool(MCPTool):
             real = tool.get("name", "")
             if not real or self._is_code_execution_tool(real):
                 continue
+            if self._ptc_only and self._is_claim_done_tool(real):
+                continue
             display = self._real_to_display.get(real, real)
             props = (tool.get("parameters") or {}).get("properties") or {}
             registry[display] = list(props.keys())
@@ -400,6 +433,8 @@ class ProgrammaticToolCallingTool(MCPTool):
             for tool in other_tools:
                 real = tool.get("name", "")
                 if not real or real in registry or self._is_code_execution_tool(real):
+                    continue
+                if self._ptc_only and self._is_claim_done_tool(real):
                     continue
                 props = (tool.get("parameters") or {}).get("properties") or {}
                 registry[real] = list(props.keys())
@@ -665,6 +700,16 @@ class ProgrammaticToolCallingTool(MCPTool):
             )
             if self._is_code_execution_tool(real):
                 fn["parameters"] = copy.deepcopy(_CODE_EXECUTION_PARAMETERS)
+                if self._ptc_only:
+                    # PTC-only mode: swap the description's first line for the
+                    # verl PTC_TOOL_DESCRIPTION_ONLY opening; the body (RICH
+                    # minus its first line) is reused from the server-provided
+                    # text, matching verl's construction exactly.
+                    desc = fn.get("description", "")
+                    if "\n" in desc:
+                        fn["description"] = (
+                            _PTC_ONLY_DESCRIPTION_OPENING + desc.split("\n", 1)[1]
+                        )
         return funcs
 
     def execute_tool(
@@ -745,6 +790,29 @@ class ProgrammaticToolCallingTool(MCPTool):
             return (True, not success, observation, tool_name, tool_call_id)
 
         else:
+            # PTC-only mode: task tools stay visible in the model-facing schema,
+            # but a direct call to anything except claim_done is answered with a
+            # redirect error instead of the tool result. Unknown names fall
+            # through so the wrapper's "tool not found" path is unchanged.
+            if (
+                self._ptc_only
+                and tool_name in self._real_to_display
+                and not self._is_claim_done_tool(tool_name)
+            ):
+                display = self._real_to_display.get(tool_name, tool_name)
+                return (
+                    True,
+                    True,
+                    (
+                        f"[Error] Direct call to tool '{display}' is not allowed in "
+                        "PTC-only mode. Invoke it from inside code_execution instead, "
+                        f'e.g. tools["{display}"](...). Only code_execution and '
+                        "claim_done can be called directly."
+                    ),
+                    tool_name,
+                    tool_call_id,
+                )
+
             # This is a direct (non-code_execution) tool call. Keep it identical to
             # the original LOCA-Bench behavior: pass straight through to the real
             # tool with no result re-wrapping.

@@ -23,6 +23,19 @@ STRATEGY_MCP_SERVERS: Dict[Strategy, Dict[str, Any]] = {
             }
         }
     },
+    Strategy.PTC_ONLY: {
+        "programmatic_tool_calling": {
+            "enabled": True,
+            "type": "programmatic_tool_calling",
+            # Marker read by the runner (not by setup_mcp_servers): task tool
+            # schemas stay visible to the model, but direct calls to anything
+            # other than code_execution / claim_done are rejected.
+            "ptc_only": True,
+            "params": {
+                "workspace_path": "{agent_workspace}"
+            }
+        }
+    },
     Strategy.MEMORY_TOOL: {
         "memory_tool": {
             "enabled": True,

@@ -31,6 +31,12 @@ def list_strategies_command() -> None:
             "rather than individual tool calls.",
             "programmatic_tool_calling"
         ),
+        Strategy.PTC_ONLY: (
+            "PTC-only - task tool schemas are shown to the model but direct "
+            "calls are rejected; only code_execution and claim_done are "
+            "directly callable.",
+            "programmatic_tool_calling (ptc_only)"
+        ),
         Strategy.MEMORY_TOOL: (
             "Memory Tool - persistent storage and retrieval across conversations "
             "for long-running tasks.",

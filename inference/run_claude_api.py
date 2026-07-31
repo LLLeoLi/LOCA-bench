@@ -1005,6 +1005,16 @@ def run_single_task(
             for config in mcp_configs.values()
         )
 
+        # PTC-only mode: task tool schemas stay visible to the model, but only
+        # code_execution and claim_done may be called directly; everything else
+        # must go through code_execution's in-kernel tools[...] proxy.
+        ptc_only = any(
+            config.get("type") in ["programmatic_tool_calling", "programmatic-tool-calling"]
+            and config.get("enabled", True)
+            and config.get("ptc_only", False)
+            for config in mcp_configs.values()
+        )
+
         # Check if memory_tool is enabled - we'll use Claude's native memory tool
         has_memory_tool = any(
             config.get("type") in ["memory_tool", "memory-tool"]
@@ -1013,7 +1023,7 @@ def run_single_task(
         )
 
         if has_programmatic:
-            tool = ProgrammaticToolCallingTool(mcp_config, validate_on_init=False)
+            tool = ProgrammaticToolCallingTool(mcp_config, validate_on_init=False, ptc_only=ptc_only)
         else:
             tool = MCPTool(mcp_config, validate_on_init=False)
 
@@ -1071,6 +1081,20 @@ def run_single_task(
             client = anthropic.Anthropic(api_key=api_key, base_url=base_url)
         else:
             client = anthropic.Anthropic(api_key=api_key)
+
+        # Tell the model up front about the PTC-only restriction so it does not
+        # burn tool-use budget discovering it from rejection errors.
+        if ptc_only:
+            user_prompt = user_prompt + (
+                "\n\n"
+                "IMPORTANT: PTC-ONLY MODE.\n"
+                "All task tools are listed in your tool schema for reference only; calling them "
+                "directly is disabled and will return an error. To use them, call the "
+                "`code_execution` tool with Python code and invoke tools inside the code as "
+                "tools[\"tool_name\"](...). Only `code_execution` and `claim_done` can be "
+                "called directly. When the task is finished, call `claim_done` directly."
+            )
+            print(f"[{task_label}] PTC-only mode: Added PTC-ONLY protocol to user prompt")
 
         # Initialize messages in Claude native format (no more format conversion!)
         claude_messages = [{"role": "user", "content": user_prompt}]

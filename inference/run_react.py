@@ -1206,6 +1206,16 @@ def run_single_task(
             for config in mcp_configs.values()
         )
 
+        # PTC-only mode: task tool schemas stay visible to the model, but only
+        # code_execution and claim_done may be called directly; everything else
+        # must go through code_execution's in-kernel tools[...] proxy.
+        ptc_only = any(
+            config.get("type") in ["programmatic_tool_calling", "programmatic-tool-calling"]
+            and config.get("enabled", True)
+            and config.get("ptc_only", False)
+            for config in mcp_configs.values()
+        )
+
         # Repair schemas (e.g. arrays missing 'items') for OpenAI-compatible
         # endpoints. The fix is a no-op for already-valid schemas, and the
         # OpenAI API rejects the entire tools array otherwise — matching only
@@ -1213,7 +1223,7 @@ def run_single_task(
         fix_schema = True
 
         if has_programmatic:
-            tool = ProgrammaticToolCallingTool(mcp_config, validate_on_init=False, execution_timeout=120.0, fix_schema_for_openai=fix_schema)
+            tool = ProgrammaticToolCallingTool(mcp_config, validate_on_init=False, execution_timeout=120.0, fix_schema_for_openai=fix_schema, ptc_only=ptc_only)
         else:
             tool = MCPTool(mcp_config, validate_on_init=False, execution_timeout=120.0, fix_schema_for_openai=fix_schema)
 
@@ -1265,6 +1275,22 @@ def run_single_task(
             enhanced_user_prompt += memory_protocol
             if verbose:
                 print(f"[Task {task_id} | {task_label}] Memory tool detected: Added MEMORY PROTOCOL to user prompt")
+
+        # Tell the model up front about the PTC-only restriction so it does not
+        # burn tool-use budget discovering it from rejection errors.
+        if ptc_only:
+            ptc_only_protocol = (
+                "\n\n"
+                "IMPORTANT: PTC-ONLY MODE.\n"
+                "All task tools are listed in your tool schema for reference only; calling them "
+                "directly is disabled and will return an error. To use them, call the "
+                "`code_execution` tool with Python code and invoke tools inside the code as "
+                "tools[\"tool_name\"](...). Only `code_execution` and `claim_done` can be "
+                "called directly. When the task is finished, call `claim_done` directly."
+            )
+            enhanced_user_prompt += ptc_only_protocol
+            if verbose:
+                print(f"[Task {task_id} | {task_label}] PTC-only mode: Added PTC-ONLY protocol to user prompt")
 
         # Add context awareness if enabled
         if context_awareness and max_context_size is not None:
