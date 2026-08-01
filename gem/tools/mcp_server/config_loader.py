@@ -295,7 +295,26 @@ class ServerConfigLoader:
         # Determine project root
         project_root = self._get_project_root(script_path)
 
-        args = ["--directory", str(project_root), "run", "python", str(script_path)]
+        # --frozen --no-sync: use mcp_convert/uv.lock exactly as committed and
+        # never touch the venv at launch time. Building the env is install.sh's
+        # job (`uv sync --frozen`). Both flags matter:
+        #   --frozen  stops uv re-resolving, which would let dependencies drift
+        #             away from the locked set on a freshly cloned node.
+        #   --no-sync stops uv mutating mcp_convert/.venv while the server
+        #             starts. That write fails outright under bwrap write
+        #             confinement, and with five uv-launched servers coming up
+        #             at once they also race each other on the venv -- either
+        #             way the server dies and it surfaces as a 120s MCP
+        #             discovery timeout.
+        args = [
+            "--directory",
+            str(project_root),
+            "run",
+            "--frozen",
+            "--no-sync",
+            "python",
+            str(script_path),
+        ]
         args.extend(self._build_cli_args(config, params))
 
         return "uv", args

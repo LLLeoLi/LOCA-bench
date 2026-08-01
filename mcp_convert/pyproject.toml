@@ -5,9 +5,13 @@ description = "MCP servers collection using local files as database"
 authors = [
     {name = "MCP Convert", email = "mcp@example.com"},
 ]
+# Pinned exactly, matching uv.lock. mcp must stay 1.x: 2.0.0 removed the
+# low-level Server decorator API these servers use, so any drift makes all five
+# uv-launched servers (calendar, google_cloud, google_sheet, snowflake,
+# woocommerce) crash at startup and shows up as a 120s MCP discovery timeout.
 dependencies = [
-    "mcp>=1.9.0,<2",
-    "pandas>=1.5.0",
+    "mcp==1.29.0",
+    "pandas==3.0.5",
 ]
 requires-python = ">=3.12"
 
@@ -20,8 +24,8 @@ packages = ["common", "mcps"]
 
 [tool.uv]
 dev-dependencies = [
-    "pytest>=7.0.0",
-    "pytest-asyncio>=0.20.0",
-    "black>=22.0.0",
-    "ruff>=0.1.0",
+    "pytest==9.1.1",
+    "pytest-asyncio==1.4.0",
+    "black==26.5.1",
+    "ruff==0.16.0",
 ]

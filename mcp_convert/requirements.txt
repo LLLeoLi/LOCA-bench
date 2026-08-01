@@ -1,3 +1,4 @@
-mcp>=1.0.0,<2
-pandas>=1.5.0
-asyncio
+# Pinned to match mcp_convert/pyproject.toml and uv.lock.
+# mcp must stay 1.x -- 2.0.0 dropped the low-level Server decorator API.
+mcp==1.29.0
+pandas==3.0.5

@@ -5,7 +5,14 @@ description: PDF manipulation and processing tools
 
 execution:
   command_type: uvx
-  package_name: "pdf-tools-mcp"
+  package_name: "pdf-tools-mcp==0.1.4"
+  with_requirements:
+    # pdf-tools-mcp asks for `fastmcp>=2.10.5` and `mcp[cli]>=1.11.0`, both of
+    # which now float into the 3.x / 2.x majors. Pin them so the ephemeral uvx
+    # env matches what install.sh pre-caches -- otherwise the first task using
+    # this server pays a cold resolve and blows the 120s discovery timeout.
+    - "fastmcp==2.14.7"
+    - "mcp==1.29.0"
 
 parameters:
   workspace_path:

@@ -5,9 +5,9 @@ description: Terminal command execution server with security controls
 
 execution:
   command_type: uvx
-  package_name: "cli-mcp-server"
+  package_name: "cli-mcp-server==0.2.5"
   with_requirements:
-    - "mcp<2"  # cli-mcp-server 0.2.x uses the mcp 1.x low-level Server API
+    - "mcp==1.29.0"  # cli-mcp-server 0.2.x uses the mcp 1.x low-level Server API
 
 parameters:
   agent_workspace:

@@ -23,6 +23,16 @@ log "Checking system dependencies..."
 # Detect Python version for the correct -dev package
 PYTHON_VERSION=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
 
+# The dependency pins in pyproject.toml are resolved for Python 3.12 (numpy and
+# pandas both require >=3.12, and mcp_convert hard-requires >=3.12). Bail out now
+# rather than let pip resolve a silently different set on the wrong interpreter.
+if [[ "$PYTHON_VERSION" != "3.12" ]]; then
+  log "ERROR: LOCA-bench requires Python 3.12, but python3 is ${PYTHON_VERSION}."
+  log "Create and activate a 3.12 environment first, e.g.:"
+  log "  conda create -n loca python=3.12 -y && conda activate loca"
+  exit 1
+fi
+
 install_python_dev() {
   if command -v apt-get &> /dev/null; then
     # Debian/Ubuntu
@@ -68,21 +78,23 @@ else
   python -m pip install --upgrade pip
 fi
 
-# Pre-install common deps MCP servers need
+# Pre-install common deps MCP servers need.
+# Every version here is pinned and must stay in sync with the pins in
+# pyproject.toml -- floating specs pull breaking releases on fresh nodes.
 $PIP_CMD install --no-cache-dir \
-  fire \
-  python-dotenv \
-  tiktoken \
-  uv \
-  reportlab \
-  cryptography \
-  ruff \
-  black \
-  pandas \
-  numpy \
-  pydantic-core \
-  openpyxl \
-  pillow
+  "fire==0.7.1" \
+  "python-dotenv==1.2.2" \
+  "tiktoken==0.13.0" \
+  "uv==0.12.0" \
+  "reportlab==5.0.0" \
+  "cryptography==49.0.0" \
+  "ruff==0.16.0" \
+  "black==26.5.1" \
+  "pandas==3.0.5" \
+  "numpy==2.5.1" \
+  "pydantic-core==2.46.4" \
+  "openpyxl==3.1.5" \
+  "pillow==12.3.0"
 
 # Install the local project in editable mode (includes fastmcp, excel-mcp-server, etc.)
 if [[ -d "$PROJECT_DIR" ]]; then
@@ -99,7 +111,9 @@ fi
 # Building the env now (managed Python >=3.12 download + deps from uv.lock)
 # keeps first-task server startup well under the 120s MCP discovery timeout.
 log "Pre-building mcp_convert uv environment..."
-uv --directory "$PROJECT_DIR/mcp_convert" sync
+# --frozen matches how config_loader.py launches these servers (`uv run --frozen`),
+# so the env built here is byte-for-byte the one used at eval time.
+uv --directory "$PROJECT_DIR/mcp_convert" sync --frozen
 
 # ====== 2) nvm + Node ======
 log "Installing nvm ($NVM_VERSION) and Node.js ($NODE_MAJOR)..."
@@ -156,7 +170,11 @@ export PATH="$HOME/.local/bin:$PATH"
 
 # ====== 4) npm global packages ======
 log "Installing npm global packages..."
-npm install -g @modelcontextprotocol/server-filesystem @modelcontextprotocol/server-memory
+# Pinned: these must match the versions in config/filesystem.yaml and
+# config/memory.yaml so npx serves from cache instead of re-resolving.
+npm install -g \
+  @modelcontextprotocol/server-filesystem@2026.1.14 \
+  @modelcontextprotocol/server-memory@2026.7.4
 
 # ====== 5) Pre-cache uvx tools ======
 # Warm the exact ephemeral environments the eval-time uvx invocations resolve
@@ -164,7 +182,7 @@ npm install -g @modelcontextprotocol/server-filesystem @modelcontextprotocol/ser
 # </dev/null makes the stdio servers exit immediately after the env is built.
 log "Pre-caching uvx tools (ignore failures)..."
 uvx --help || true
-ALLOWED_DIR=/tmp uvx --with "mcp<2" cli-mcp-server </dev/null || true
-uvx pdf-tools-mcp </dev/null || true
+ALLOWED_DIR=/tmp uvx --with "mcp==1.29.0" "cli-mcp-server==0.2.5" </dev/null || true
+uvx --with "fastmcp==2.14.7" --with "mcp==1.29.0" "pdf-tools-mcp==0.1.4" </dev/null || true
 
 log "Done ✅"
