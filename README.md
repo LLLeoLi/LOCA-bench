@@ -52,7 +52,7 @@ Our implementation is based on [GEM](https://github.com/axon-rl/gem). Follow the
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # Clone the repository
-git clone https://github.com/hkust-nlp/LOCA-bench.git
+git clone https://github.com/LLLeoLi/LOCA-bench.git
 cd LOCA-bench
 
 # Create virtual environment and install dependencies
@@ -73,7 +73,8 @@ Our default evaluation requires an OPENAI Chat Completion API endpoint set up vi
 
 ```bash
 export LOCA_OPENAI_API_KEY=your_key_here
-export LOCA_OPENAI_BASE_URL=your_base_url_here
+export LOCA_OPENAI_BASE_URL=http://127.0.0.1:8025/v1
+cp /mnt/public_02/lihao/LOCA-bench/task-configs/merged_8k_16k_32k_64k_config.json task-configs
 ```
 
 ### 2. Run Evaluation
@@ -87,7 +88,8 @@ loca run --help
 
 Example commands:
 ```bash
-loca run -c task-configs/final_8k_set_config.json -m deepseek-reasoner --max-context-size 130000
+loca run -c task-configs/merged_8k_16k_32k_64k_config.json -m Qwen3-8B -o Qwen3-8B
+loca run -s ptc -c task-configs/merged_8k_16k_32k_64k_config.json -m Qwen3-8B -o Qwen3-8B-ptc
 ```
 
 Environment configurations are provided under `task-configs/` with preset environment description lengths: **8K, 16K, 32K, 64K, 96K, 128K, and 256K** tokens.
