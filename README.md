@@ -55,11 +55,8 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 git clone https://github.com/LLLeoLi/LOCA-bench.git
 cd LOCA-bench
 
-# Create virtual environment and install dependencies
-uv venv --python 3.10
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-
-# Install dependencies
+uv venv --python 3.12
+source .venv/bin/activate
 bash install.sh
 ```
 
