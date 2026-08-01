@@ -71,7 +71,6 @@ Our default evaluation requires an OPENAI Chat Completion API endpoint set up vi
 ```bash
 export LOCA_OPENAI_API_KEY=your_key_here
 export LOCA_OPENAI_BASE_URL=http://127.0.0.1:8025/v1
-cp /mnt/public_02/lihao/LOCA-bench/task-configs/merged_8k_16k_32k_64k_config.json task-configs
 ```
 
 ### 2. Run Evaluation
