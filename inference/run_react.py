@@ -1216,6 +1216,16 @@ def run_single_task(
             for config in mcp_configs.values()
         )
 
+        # Ablation: suppress error signalling inside PTC (see
+        # ProgrammaticToolCallingTool.suppress_errors). Marker is injected by
+        # the CLI's --suppress-errors flag.
+        suppress_errors = any(
+            config.get("type") in ["programmatic_tool_calling", "programmatic-tool-calling"]
+            and config.get("enabled", True)
+            and config.get("suppress_errors", False)
+            for config in mcp_configs.values()
+        )
+
         # Repair schemas (e.g. arrays missing 'items') for OpenAI-compatible
         # endpoints. The fix is a no-op for already-valid schemas, and the
         # OpenAI API rejects the entire tools array otherwise — matching only
@@ -1223,7 +1233,7 @@ def run_single_task(
         fix_schema = True
 
         if has_programmatic:
-            tool = ProgrammaticToolCallingTool(mcp_config, validate_on_init=False, execution_timeout=120.0, fix_schema_for_openai=fix_schema, ptc_only=ptc_only)
+            tool = ProgrammaticToolCallingTool(mcp_config, validate_on_init=False, execution_timeout=120.0, fix_schema_for_openai=fix_schema, ptc_only=ptc_only, suppress_errors=suppress_errors)
         else:
             tool = MCPTool(mcp_config, validate_on_init=False, execution_timeout=120.0, fix_schema_for_openai=fix_schema)
 

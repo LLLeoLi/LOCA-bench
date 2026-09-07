@@ -48,6 +48,18 @@ def run_command(
             rich_help_panel="Core Configuration",
         ),
     ] = Strategy.REACT,
+    suppress_errors: Annotated[
+        bool,
+        typer.Option(
+            "--suppress-errors/--no-suppress-errors",
+            help=(
+                "Ablation for ptc/ptc_only: tool errors inside code_execution are "
+                "returned as plain strings instead of raising, and observations are "
+                "never flagged is_error. Ignored for other strategies."
+            ),
+            rich_help_panel="Core Configuration",
+        ),
+    ] = False,
     output_dir: Annotated[
         Optional[str],
         typer.Option(
@@ -295,6 +307,7 @@ def run_command(
                 reasoning_effort=reasoning_effort,
                 reasoning_max_tokens=reasoning_max_tokens,
                 resume_dir=resume_dir,
+                suppress_errors=suppress_errors,
             )
         except FileNotFoundError as e:
             console.print(f"[red]Error:[/red] {e}")
@@ -309,7 +322,9 @@ def run_command(
 
     # Inject strategy-specific MCP servers into config
     effective_config_path = final_output_dir / f"config_{strategy.value}.json"
-    inject_strategy_servers(full_config_path, strategy, effective_config_path)
+    inject_strategy_servers(
+        full_config_path, strategy, effective_config_path, suppress_errors=suppress_errors
+    )
 
     # Print configuration
     is_resume = resume_dir is not None
@@ -320,6 +335,8 @@ def run_command(
     table.add_column("Value")
 
     table.add_row("Strategy", strategy.value)
+    if suppress_errors:
+        table.add_row("  Suppress errors (ablation)", "True")
     table.add_row("Config file", str(full_config_path))
     table.add_row("Max workers", str(max_workers))
     table.add_row("", "")

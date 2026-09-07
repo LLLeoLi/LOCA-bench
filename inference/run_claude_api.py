@@ -1015,6 +1015,16 @@ def run_single_task(
             for config in mcp_configs.values()
         )
 
+        # Ablation: suppress error signalling inside PTC (see
+        # ProgrammaticToolCallingTool.suppress_errors). Marker is injected by
+        # the CLI's --suppress-errors flag.
+        suppress_errors = any(
+            config.get("type") in ["programmatic_tool_calling", "programmatic-tool-calling"]
+            and config.get("enabled", True)
+            and config.get("suppress_errors", False)
+            for config in mcp_configs.values()
+        )
+
         # Check if memory_tool is enabled - we'll use Claude's native memory tool
         has_memory_tool = any(
             config.get("type") in ["memory_tool", "memory-tool"]
@@ -1023,7 +1033,7 @@ def run_single_task(
         )
 
         if has_programmatic:
-            tool = ProgrammaticToolCallingTool(mcp_config, validate_on_init=False, ptc_only=ptc_only)
+            tool = ProgrammaticToolCallingTool(mcp_config, validate_on_init=False, ptc_only=ptc_only, suppress_errors=suppress_errors)
         else:
             tool = MCPTool(mcp_config, validate_on_init=False)
 

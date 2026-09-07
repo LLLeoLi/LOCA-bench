@@ -4,6 +4,7 @@
 
 """Strategy-specific MCP server injection for LOCA-bench CLI."""
 
+import copy
 import json
 from pathlib import Path
 from typing import Any, Dict
@@ -49,7 +50,12 @@ STRATEGY_MCP_SERVERS: Dict[Strategy, Dict[str, Any]] = {
 }
 
 
-def inject_strategy_servers(config_path: Path, strategy: Strategy, output_path: Path) -> Path:
+def inject_strategy_servers(
+    config_path: Path,
+    strategy: Strategy,
+    output_path: Path,
+    suppress_errors: bool = False,
+) -> Path:
     """Inject strategy-specific MCP servers into a config file.
 
     Reads the config file, adds strategy-specific MCP servers to each
@@ -59,6 +65,11 @@ def inject_strategy_servers(config_path: Path, strategy: Strategy, output_path: 
         config_path: Path to the original config file.
         strategy: The context management strategy.
         output_path: Path to write the modified config.
+        suppress_errors: Ablation marker read by the runner. When True, the
+            injected programmatic_tool_calling server gets ``"suppress_errors":
+            True`` so tool errors inside code_execution are returned as plain
+            values instead of raising, and observations are never flagged
+            is_error. Only meaningful for the ptc / ptc_only strategies.
 
     Returns:
         Path to the modified config file.
@@ -66,7 +77,9 @@ def inject_strategy_servers(config_path: Path, strategy: Strategy, output_path: 
     with open(config_path, "r") as f:
         config = json.load(f)
 
-    additional_servers = STRATEGY_MCP_SERVERS.get(strategy, {})
+    additional_servers = copy.deepcopy(STRATEGY_MCP_SERVERS.get(strategy, {}))
+    if suppress_errors and "programmatic_tool_calling" in additional_servers:
+        additional_servers["programmatic_tool_calling"]["suppress_errors"] = True
 
     if additional_servers:
         # Inject servers into each configuration

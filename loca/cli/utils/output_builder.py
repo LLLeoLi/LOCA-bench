@@ -136,6 +136,7 @@ def build_output_dir(
     reasoning_max_tokens: Optional[int] = None,
     resume_dir: Optional[str] = None,
     add_timestamp: bool = True,
+    suppress_errors: bool = False,
 ) -> Path:
     """Build the output directory path for benchmark results.
 
@@ -156,6 +157,8 @@ def build_output_dir(
         reasoning_max_tokens: Reasoning max tokens.
         resume_dir: Optional path to resume from. If "true", auto-construct path.
         add_timestamp: Whether to add timestamp to directory name.
+        suppress_errors: PTC error-suppression ablation; adds a ``_noerr``
+            marker to the strategy prefix so runs do not collide.
 
     Returns:
         Path to output directory.
@@ -194,7 +197,7 @@ def build_output_dir(
     )
 
     return _build_output_path(
-        prefix=f"inf_{strategy.value}",
+        prefix=f"inf_{strategy.value}" + ("_noerr" if suppress_errors else ""),
         config_file=config_file,
         model=model,
         suffix=param_suffix,

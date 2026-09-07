@@ -35,6 +35,14 @@ from gem.tools.mcp_server.programmatic_tool_calling.stateful_kernel import State
 # to finish before the kernel is killed. Model code cannot override it;
 # configure via the ptc_timeout kwarg or LOCA_PTC_TIMEOUT.
 _DEFAULT_PTC_TIMEOUT = float(os.getenv("LOCA_PTC_TIMEOUT", "120.0"))
+# Ablation switch: when true, tool errors are never signalled as errors.
+# Inside code_execution a failed tools[...]() call returns its error text as a
+# plain string instead of raising, and the code_execution / ptc_only-redirect
+# observations are reported with tool_execute_error=False (is_error=False).
+# Configure via the suppress_errors kwarg or LOCA_PTC_SUPPRESS_ERRORS=1.
+_DEFAULT_SUPPRESS_ERRORS = os.getenv("LOCA_PTC_SUPPRESS_ERRORS", "").strip().lower() in (
+    "1", "true", "yes", "on"
+)
 
 # Wall-clock budget for the one-shot setup code (tools proxy injection).
 # Matches verl's _SANDBOX_SETUP_TIMEOUT.
@@ -237,6 +245,7 @@ class ProgrammaticToolCallingTool(MCPTool):
         validate_on_init: bool = False,
         ptc_timeout: Optional[float] = None,
         ptc_only: bool = False,
+        suppress_errors: Optional[bool] = None,
         **kwargs
     ):
         """Initialize the Programmatic Tool Calling tool.
@@ -255,11 +264,22 @@ class ProgrammaticToolCallingTool(MCPTool):
                       in-kernel ``tools`` proxy so task completion must be
                       claimed with a direct call (a claim inside code would not
                       terminate the episode).
+            suppress_errors: Ablation switch. If True, tool failures inside
+                      code_execution are returned as plain string values
+                      instead of raising in the kernel (so model-side
+                      try/except never fires), and code_execution / ptc_only
+                      redirect observations are flagged as non-errors.
+                      Infrastructure failures (sandbox cannot start) and the
+                      kernel restart / hint logic are unaffected. Defaults to
+                      LOCA_PTC_SUPPRESS_ERRORS or False.
             **kwargs: Additional arguments to pass to MCPTool constructor
         """
         super().__init__(config, validate_on_init=validate_on_init, **kwargs)
         self._other_tools = tools or []
         self._ptc_only = ptc_only
+        self._suppress_errors = (
+            _DEFAULT_SUPPRESS_ERRORS if suppress_errors is None else bool(suppress_errors)
+        )
 
         # MCPMark-alignment state (built lazily from discovered tools).
         # LOCA-Bench presents FastMCP multi-server tool names/descriptions
@@ -443,7 +463,21 @@ class ProgrammaticToolCallingTool(MCPTool):
     def _bridge_dispatch(
         self, display_name: str, args: List[Any], kwargs: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """Handle one kernel-side ``tools[name](*args, **kwargs)`` call."""
+        """Handle one kernel-side ``tools[name](*args, **kwargs)`` call.
+
+        With ``suppress_errors`` every failure (tool error, unknown name,
+        bad positional args, dispatch exception) is rewritten to ``ok=True``
+        with the error text as the value, so the kernel-side proxy never
+        raises and the model's ``try/except`` never fires.
+        """
+        resp = self._bridge_dispatch_impl(display_name, args, kwargs)
+        if self._suppress_errors and not resp.get("ok", False):
+            return {"ok": True, "value": str(resp.get("value", ""))}
+        return resp
+
+    def _bridge_dispatch_impl(
+        self, display_name: str, args: List[Any], kwargs: Dict[str, Any]
+    ) -> Dict[str, Any]:
         registry = self._tool_registry
         if display_name not in registry:
             # The kernel-side proxy already guards on the name list; this is
@@ -787,7 +821,8 @@ class ProgrammaticToolCallingTool(MCPTool):
                     "subdirectories). Use a path inside it -- relative paths and "
                     "the pre-defined `workspace` variable already resolve there."
                 )
-            return (True, not success, observation, tool_name, tool_call_id)
+            is_error = False if self._suppress_errors else (not success)
+            return (True, is_error, observation, tool_name, tool_call_id)
 
         else:
             # PTC-only mode: task tools stay visible in the model-facing schema,
@@ -802,7 +837,7 @@ class ProgrammaticToolCallingTool(MCPTool):
                 display = self._real_to_display.get(tool_name, tool_name)
                 return (
                     True,
-                    True,
+                    not self._suppress_errors,
                     (
                         f"[Error] Direct call to tool '{display}' is not allowed in "
                         "PTC-only mode. Invoke it from inside code_execution instead, "
