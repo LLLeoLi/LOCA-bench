@@ -17,7 +17,8 @@ parameters:
     description: "Base path for memory storage"
 
 workspace:
-  set_cwd: true
-  cwd_param: base_path
+  # Task reset can remove base_path after config creation, before discovery.
+  # The server uses --base-path and creates its storage on first access;
+  # it must not require that storage directory to exist at process startup.
+  set_cwd: false
   supports_placeholders: true
-  mkdir_if_needed: true  # Create base_path before starting the server in it
