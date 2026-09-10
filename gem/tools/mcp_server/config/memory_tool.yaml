@@ -20,4 +20,4 @@ workspace:
   set_cwd: true
   cwd_param: base_path
   supports_placeholders: true
-  mkdir_if_needed: false  # Parent directory used as cwd
+  mkdir_if_needed: true  # Create base_path before starting the server in it
