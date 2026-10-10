@@ -15,7 +15,7 @@ from loca.cli.utils.config_resolver import Strategy
 # MCP server configurations for each strategy
 STRATEGY_MCP_SERVERS: Dict[Strategy, Dict[str, Any]] = {
     Strategy.REACT: {},  # No additional servers
-    Strategy.PTC: {
+    Strategy.HYBRID: {
         "programmatic_tool_calling": {
             "enabled": True,
             "type": "programmatic_tool_calling",
@@ -24,7 +24,7 @@ STRATEGY_MCP_SERVERS: Dict[Strategy, Dict[str, Any]] = {
             }
         }
     },
-    Strategy.PTC_ONLY: {
+    Strategy.PTC: {
         "programmatic_tool_calling": {
             "enabled": True,
             "type": "programmatic_tool_calling",
@@ -69,7 +69,7 @@ def inject_strategy_servers(
             injected programmatic_tool_calling server gets ``"suppress_errors":
             True`` so tool errors inside code_execution are returned as plain
             values instead of raising, and observations are never flagged
-            is_error. Only meaningful for the ptc / ptc_only strategies.
+            is_error. Only meaningful for the hybrid / ptc strategies.
 
     Returns:
         Path to the modified config file.

@@ -26,16 +26,16 @@ def list_strategies_command() -> None:
             "The default strategy for standard evaluations.",
             "None (base tools only)"
         ),
-        Strategy.PTC: (
-            "Programmatic Tool Calling - orchestrate tools by executing code "
-            "rather than individual tool calls.",
+        Strategy.HYBRID: (
+            "Hybrid - supports both direct tool calls and programmatic "
+            "tool calling via code_execution.",
             "programmatic_tool_calling"
         ),
-        Strategy.PTC_ONLY: (
-            "PTC-only - task tool schemas are shown to the model but direct "
+        Strategy.PTC: (
+            "PTC - task tool schemas are shown to the model but direct "
             "calls are rejected; only code_execution and claim_done are "
             "directly callable.",
-            "programmatic_tool_calling (ptc_only)"
+            "programmatic_tool_calling"
         ),
         Strategy.MEMORY_TOOL: (
             "Memory Tool - persistent storage and retrieval across conversations "

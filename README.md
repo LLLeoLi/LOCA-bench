@@ -103,10 +103,13 @@ LOCA-bench supports multiple context management strategies:
 | Strategy | Description | Additional MCP Server |
 |----------|-------------|----------------------|
 | `react` (default) | Basic reactive agent framework | None |
-| `ptc` | Programmatic Tool Calling - orchestrate tools via code execution | `programmatic_tool_calling` |
+| `ptc` | Programmatic Tool Calling - task tools must be invoked via code execution; only `code_execution` and `claim_done` are directly callable | `programmatic_tool_calling` |
+| `hybrid` | Both direct tool calls and programmatic tool calling via code execution | `programmatic_tool_calling` |
 | `memory_tool` | Persistent storage and retrieval across conversations | `memory_tool` |
 
-All strategies use the same config files from `task-configs/`. 
+All strategies use the same config files from `task-configs/`.
+
+Strategy names have changed: the former `ptc_only` is now `ptc`, and the former `ptc` is now `hybrid`.
 
 ### Usage Examples
 
@@ -118,6 +121,11 @@ loca run -c task-configs/final_8k_set_config.json
 **Programmatic Tool Calling (PTC):**
 ```bash
 loca run -s ptc -c task-configs/final_8k_set_config.json
+```
+
+**Hybrid Tool Calling:**
+```bash
+loca run -s hybrid -c task-configs/final_8k_set_config.json
 ```
 
 **Memory Tool Strategy:**

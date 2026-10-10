@@ -53,7 +53,7 @@ def run_command(
         typer.Option(
             "--suppress-errors/--no-suppress-errors",
             help=(
-                "Ablation for ptc/ptc_only: tool errors inside code_execution are "
+                "Ablation for hybrid/ptc: tool errors inside code_execution are "
                 "returned as plain strings instead of raising, and observations are "
                 "never flagged is_error. Ignored for other strategies."
             ),

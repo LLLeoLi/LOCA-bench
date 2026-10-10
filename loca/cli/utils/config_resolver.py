@@ -16,8 +16,8 @@ class Strategy(str, Enum):
     """Available context management strategies."""
 
     REACT = "react"
+    HYBRID = "hybrid"
     PTC = "ptc"
-    PTC_ONLY = "ptc_only"
     MEMORY_TOOL = "memory_tool"
 
 
