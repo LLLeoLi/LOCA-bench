@@ -500,20 +500,9 @@ class MCPTool(BaseTool):
                 return self._available_tools or []
 
             print(f"[MCP] Discovering tools from servers...")
+            # _async_discover_tools retries both hard failures and partial
+            # discoveries (FastMCP silently skips servers it cannot start).
             tools = _run_async(self._async_discover_tools())
-
-            # FastMCP silently skips servers it cannot connect to, so a
-            # "successful" discovery may still be missing entire servers.
-            # Detect that via the per-server tool-name prefixes and fail
-            # loudly instead of letting tasks run with a partial toolset.
-            missing = self._find_missing_servers(tools)
-            if missing:
-                raise MCPToolDiscoveryError(
-                    f"MCP server(s) {missing} provided no tools "
-                    f"(likely failed to start and were skipped by the client). "
-                    f"Discovered {len(tools)} tools from the remaining servers. "
-                    f"Configuration: {self._get_server_description()}"
-                )
 
             self._available_tools = tools
             self._tools_discovered = True
@@ -573,6 +562,23 @@ class MCPTool(BaseTool):
                             "server_info": server_info,
                         }
                         tools.append(tool_info)
+
+                    # FastMCP silently skips servers it cannot connect to, so a
+                    # "successful" list_tools() may still be missing entire
+                    # servers. Detect that via the per-server tool-name
+                    # prefixes and fail loudly rather than letting tasks run
+                    # with a partial toolset. Raising here (instead of after
+                    # the retry loop in _discover_tools) means a transient
+                    # startup miss gets retried too.
+                    missing = self._find_missing_servers(tools)
+                    if missing:
+                        raise MCPToolDiscoveryError(
+                            f"MCP server(s) {missing} provided no tools "
+                            f"(likely failed to start and were skipped by the "
+                            f"client). Discovered {len(tools)} tools from the "
+                            f"remaining servers. Configuration: "
+                            f"{self._get_server_description()}"
+                        )
                 # The async with block has exited, so cleanup already happened
                 return tools
 
@@ -583,6 +589,9 @@ class MCPTool(BaseTool):
                     await asyncio.sleep(self.delay_between_retries)
 
         if last_error is not None:
+            if isinstance(last_error, MCPToolDiscoveryError):
+                # Preserve the actionable "missing server(s)" message.
+                raise last_error
             raise MCPToolDiscoveryError(
                 f"MCP tool discovery failed after {self.max_retries} attempts for "
                 f"{self._get_server_description()}: {last_error}"

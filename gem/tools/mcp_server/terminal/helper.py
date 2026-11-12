@@ -108,13 +108,26 @@ def get_terminal_stdio_config(
     from pathlib import Path
     abs_allowed_dir = str(Path(allowed_dir).absolute())
 
-    # Use uvx to run cli-mcp-server (as specified in terminal.yaml)
-    # Reference: https://github.com/MladenSU/cli-mcp-server
-    # Set cwd so that relative paths in commands are resolved correctly
+    # Use uvx to run cli-mcp-server (as specified in terminal.yaml).
+    # Keep the pins in sync with terminal.yaml: cli-mcp-server 0.2.x uses the
+    # mcp 1.x low-level Server API, and install.sh pre-caches this exact
+    # requirement set for offline launches.
+    from gem.tools.mcp_server.config_loader import _loader
+
+    offline = os.environ.get("LOCA_UVX_OFFLINE", "1").lower() not in (
+        "0",
+        "false",
+        "no",
+    )
+
     config = {
         server_name: {
             "command": "uvx",
-            "args": ["cli-mcp-server"],
+            "args": [
+                "--with",
+                "mcp==1.29.0",
+                "cli-mcp-server==0.2.5",
+            ],
             "cwd": abs_allowed_dir,
             "env": {
                 "ALLOWED_DIR": abs_allowed_dir,
@@ -129,6 +142,7 @@ def get_terminal_stdio_config(
                 "CLI_PROXY_ENABLED": "true" if cli_proxy_enabled else "false",
                 "CLI_PROXY_URL": cli_proxy_url,
                 "LOCA_QUIET": os.environ.get("LOCA_QUIET", "1"),
+                "UV_OFFLINE": "1" if offline else "0",
             }
         }
     }
@@ -141,8 +155,6 @@ def get_terminal_stdio_config(
     # python/awk/sed are not treated as paths), so confine the server process
     # tree to the workspace with bwrap — same policy as terminal.yaml's
     # workspace.confine_writes handled by config_loader.
-    from gem.tools.mcp_server.config_loader import _loader
-
     entry = config[server_name]
     entry["command"], entry["args"], entry["env"] = _loader._apply_write_confinement(
         entry["command"], entry["args"], entry["env"], abs_allowed_dir

@@ -96,6 +96,21 @@ class ServerConfigLoader:
         # Build environment variables
         env = self._build_env_vars(config, params)
 
+        # uvx ephemeral environments are pre-built by install.sh. Make the
+        # runtime launch use them OFFLINE by default so it never re-resolves
+        # against PyPI: uv's index-metadata cache is versioned per uv release
+        # (simple-v24 for uv 0.12.x, simple-v27 for uv 0.13.x) and expires,
+        # so an online launch can block on a slow/unreachable index for up to
+        # UV_HTTP_TIMEOUT (500s) and blow the 120s MCP discovery timeout.
+        # Set LOCA_UVX_OFFLINE=0 to allow network access again.
+        if config.get("execution", {}).get("command_type") == "uvx":
+            offline = os.environ.get("LOCA_UVX_OFFLINE", "1").lower() not in (
+                "0",
+                "false",
+                "no",
+            )
+            env.setdefault("UV_OFFLINE", "1" if offline else "0")
+
         # Determine working directory
         cwd = self._determine_cwd(config, params)
 
@@ -147,6 +162,23 @@ class ServerConfigLoader:
 
     _uv_cache_dir_cached: Optional[str] = None
 
+    @staticmethod
+    def _uv_executable(name: str) -> str:
+        """Return the uv/uvx binary that belongs to the running interpreter.
+
+        Runtime launches must use the same uv version that ran install.sh:
+        uv's index cache is versioned (simple-v24 vs simple-v27) and therefore
+        not shared across releases. Resolving relative to ``sys.executable``
+        avoids silently picking up a different uv from PATH (the project venv
+        installs a pinned ``uv``). Fall back to PATH if the venv has no copy.
+        """
+        import sys
+
+        candidate = Path(sys.executable).parent / name
+        if candidate.exists():
+            return str(candidate)
+        return name
+
     @classmethod
     def _uv_cache_dir(cls) -> Optional[str]:
         """Effective uv cache directory, as uv itself resolves it.
@@ -160,7 +192,7 @@ class ServerConfigLoader:
 
             try:
                 result = subprocess.run(
-                    ["uv", "cache", "dir"],
+                    [cls._uv_executable("uv"), "cache", "dir"],
                     capture_output=True,
                     text=True,
                     timeout=30,
@@ -221,7 +253,7 @@ class ServerConfigLoader:
             if path and path != cwd:
                 os.makedirs(path, exist_ok=True)
                 write_paths_extra.append(path)
-        if command in ("uv", "uvx"):
+        if Path(command).name in ("uv", "uvx"):
             # uv needs write access to its cache even for a fully synced
             # `uv run` (lock files under the cache dir), and bwrap remaps HOME
             # into the workspace, which would otherwise send the cache there
@@ -317,7 +349,7 @@ class ServerConfigLoader:
         ]
         args.extend(self._build_cli_args(config, params))
 
-        return "uv", args
+        return self._uv_executable("uv"), args
 
     def _build_uvx_command(
         self, config: Dict[str, Any], params: Dict[str, Any]
@@ -337,7 +369,7 @@ class ServerConfigLoader:
         args.append(package_name)
         args.extend(self._build_cli_args(config, params))
 
-        return "uvx", args
+        return self._uv_executable("uvx"), args
 
     def _build_node_command(
         self, config: Dict[str, Any], params: Dict[str, Any]

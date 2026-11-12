@@ -180,9 +180,37 @@ npm install -g \
 # Warm the exact ephemeral environments the eval-time uvx invocations resolve
 # (matching the `with_requirements` pins in gem/tools/mcp_server/config/*.yaml).
 # </dev/null makes the stdio servers exit immediately after the env is built.
-log "Pre-caching uvx tools (ignore failures)..."
-uvx --help || true
-ALLOWED_DIR=/tmp uvx --with "mcp==1.29.0" "cli-mcp-server==0.2.5" </dev/null || true
-uvx --with "fastmcp==2.14.7" --with "mcp==1.29.0" "pdf-tools-mcp==0.1.4" </dev/null || true
+#
+# Use the uvx that ships with the interpreter the project was installed into,
+# NOT whichever uvx happens to be first on PATH. uv keeps its index cache in
+# versioned directories (simple-v24 for 0.12.x, simple-v27 for 0.13.x), so
+# pre-caching with a different uv release leaves the runtime uv with a cold
+# cache and every uvx launch re-resolves over the network. That is what made
+# MCP servers intermittently fail to start ("terminal provided no tools") after
+# a run had been going for a while.
+log "Pre-caching uvx tools..."
+RUNTIME_PYTHON="$(command -v python3)"
+RUNTIME_UVX="$(dirname "$RUNTIME_PYTHON")/uvx"
+if [[ ! -x "$RUNTIME_UVX" ]]; then
+  RUNTIME_UVX="$(command -v uvx || true)"
+fi
+
+if [[ -z "$RUNTIME_UVX" || ! -x "$RUNTIME_UVX" ]]; then
+  log "WARNING: uvx not found; skipping uvx pre-cache. Terminal/pdf_tools MCP servers will need network access on first use."
+else
+  log "Using $RUNTIME_UVX ($("$RUNTIME_UVX" --version 2>/dev/null || echo unknown))"
+  ALLOWED_DIR=/tmp "$RUNTIME_UVX" --with "mcp==1.29.0" "cli-mcp-server==0.2.5" </dev/null \
+    || log "WARNING: failed to pre-cache cli-mcp-server; terminal server may be unavailable offline."
+  "$RUNTIME_UVX" --with "fastmcp==2.14.7" --with "mcp==1.29.0" "pdf-tools-mcp==0.1.4" </dev/null \
+    || log "WARNING: failed to pre-cache pdf-tools-mcp; pdf_tools server may be unavailable offline."
+
+  # Verify the runtime uv can launch both tools with UV_OFFLINE=1 (the default
+  # used by config_loader). A failure here means the runtime uv's versioned
+  # index cache was not warmed above.
+  ALLOWED_DIR=/tmp UV_OFFLINE=1 "$RUNTIME_UVX" --with "mcp==1.29.0" "cli-mcp-server==0.2.5" </dev/null \
+    || log "WARNING: offline check for cli-mcp-server failed."
+  UV_OFFLINE=1 "$RUNTIME_UVX" --with "fastmcp==2.14.7" --with "mcp==1.29.0" "pdf-tools-mcp==0.1.4" </dev/null \
+    || log "WARNING: offline check for pdf-tools-mcp failed."
+fi
 
 log "Done ✅"
