@@ -203,3 +203,7 @@ evals/benchmarks
 CLAUDE.md
 .claude/
 outputs/
+# Local run outputs written at the repo root by `loca run -o <name>`. They
+# contain full task workspaces (groundtruth data, local DBs, trajectories)
+# and are far too large to track.
+/Qwen3-8B/
