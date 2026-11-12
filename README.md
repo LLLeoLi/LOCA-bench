@@ -170,13 +170,14 @@ After `loca run` completes, the output directory is created under `outputs/` wit
 outputs/inf_{strategy}_{config}_{model}_{params}_{timestamp}/
 ├── config_react.json          # Snapshot of the config used for this run
 ├── results.json               # Aggregated results across all tasks
+├── task_timings.json          # Per-task wall-clock time + 8k/16k/32k/64k aggregates
 ├── all_trajectories.json      # All trajectories consolidated into one file
 └── tasks/
     ├── task_mapping.json      # Maps task names to config IDs and seeds
     ├── ABTestingS2LEnv/
     │   ├── state0/
     │   │   ├── trajectory.json    # Full agent trajectory (messages, events, metrics)
-    │   │   ├── eval.json          # Per-state evaluation result (accuracy, steps, feedback)
+    │   │   ├── eval.json          # Per-state result (accuracy, steps, feedback, wall clock)
     │   │   ├── token_stats.json   # Token usage tracking per API call
     │   │   ├── agent_workspace/   # Agent's working directory during the task
     │   │   ├── groundtruth_workspace/  # Ground truth for evaluation
@@ -195,11 +196,32 @@ outputs/inf_{strategy}_{config}_{model}_{params}_{timestamp}/
 
 | File | Description |
 |------|-------------|
-| `results.json` | Overall summary (avg accuracy, steps, token usage) and per-task breakdown |
+| `results.json` | Overall summary (avg accuracy, steps, token usage, wall clock) and per-task breakdown |
+| `task_timings.json` | Every task's `wall_clock_seconds` plus per-size (8k/16k/32k/64k) totals/averages/percentiles |
 | `all_trajectories.json` | Every trajectory keyed by `TaskName/stateN`, used by the visualization tool |
-| `eval.json` | Per-task result: `status`, `accuracy`, `steps`, and evaluation `feedback` |
-| `trajectory.json` | Full agent-environment interaction: messages, tool calls, events (resets, trims), and metrics |
+| `eval.json` | Per-task result: `status`, `accuracy`, `steps`, `feedback`, `wall_clock_seconds`, `start_time`, `end_time` |
+| `trajectory.json` | Full agent-environment interaction: messages, tool calls, events (resets, trims), and metrics (including `wall_clock_seconds`) |
 | `token_stats.json` | Per-API-call token usage for cost and context growth analysis |
+
+### Timing Analysis
+
+Every task records its own wall-clock duration from `run_single_task` start to
+finish (environment setup, MCP startup, all agent steps, and evaluation). After
+a run, summarize by context size:
+
+```bash
+# newest run under outputs/ (or a top-level -o directory)
+loca timings
+
+# specific run, including one row per task
+loca timings -i outputs/inf_react_..._20260101_120000 --per-task
+
+# write the summary somewhere else
+loca timings -i outputs/inf_react_..._20260101_120000 -o /tmp/timing_summary.json
+```
+
+The command prints total / average / p50 / p90 / min / max per `8k`, `16k`,
+`32k`, `64k` bucket and writes `timing_summary.json` into the run directory.
 
 ---
 

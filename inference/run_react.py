@@ -90,6 +90,13 @@ from inference.common.trajectory_schema import (
     attach_provider_payload,
     make_base_envelope,
 )
+from inference.common.timing import (
+    format_duration,
+    parse_size_bucket,
+    summarize_seconds,
+    summarize_tasks,
+    utc_now_iso,
+)
 
 load_dotenv()
 
@@ -1135,6 +1142,8 @@ def run_single_task(
         Dictionary with task results
     """
     verbose = False
+    task_start_epoch = time.time()
+    task_start_iso = utc_now_iso()
     task_label = f"{config_name}-State{run_id}" if config_name else f"Config{config_id}-Run{run_id}"
     if verbose:
         print(f"[Task {task_id} | {task_label}] Starting...")
@@ -1916,6 +1925,7 @@ def run_single_task(
                     "accuracy": reward,
                     "total_steps": step_count,
                     "completed": done,
+                    "wall_clock_seconds": round(time.time() - task_start_epoch, 3),
                 },
             }
 
@@ -1947,6 +1957,7 @@ def run_single_task(
                 accuracy=reward,
                 total_steps=step_count,
                 completed=done,
+                wall_clock_seconds=round(time.time() - task_start_epoch, 3),
             )
             attach_provider_payload(
                 envelope,
@@ -1982,6 +1993,7 @@ def run_single_task(
                 "accuracy": reward,
                 "total_steps": step_count,
                 "completed": True,
+                "wall_clock_seconds": round(time.time() - task_start_epoch, 3),
             },
         }
 
@@ -2013,6 +2025,7 @@ def run_single_task(
             accuracy=reward,
             total_steps=step_count,
             completed=True,
+            wall_clock_seconds=round(time.time() - task_start_epoch, 3),
         )
         attach_provider_payload(
             envelope,
@@ -2034,12 +2047,18 @@ def run_single_task(
 
         # Save eval.json alongside trajectory.json
         feedback = info.get("env_observation", "") if info else ""
+        task_end_epoch = time.time()
+        task_end_iso = utc_now_iso()
+        wall_clock_seconds = round(task_end_epoch - task_start_epoch, 3)
         write_eval_file(
             task_workspace=save_file.parent,
             status="success",
             accuracy=reward,
             steps=step_count,
             feedback=feedback,
+            wall_clock_seconds=wall_clock_seconds,
+            start_time=task_start_iso,
+            end_time=task_end_iso,
         )
 
         if verbose:
@@ -2114,6 +2133,9 @@ def run_single_task(
             "reset_tokens": reset_tokens,
             "thinking_reset_tokens": thinking_reset_tokens,
             "summary_tokens": summary_tokens,
+            "start_time": task_start_iso,
+            "end_time": task_end_iso,
+            "wall_clock_seconds": wall_clock_seconds,
         }
         
     except Exception as e:
@@ -2121,6 +2143,10 @@ def run_single_task(
         print(f"[Task {task_id} | {task_label}] Error: {e}", file=sys.stderr)
         import traceback
         traceback.print_exc()
+
+        task_end_epoch = time.time()
+        task_end_iso = utc_now_iso()
+        wall_clock_seconds = round(task_end_epoch - task_start_epoch, 3)
 
         # Save partial episode on error
         if episode:
@@ -2153,6 +2179,7 @@ def run_single_task(
                 accuracy=0.0,
                 total_steps=len(episode),
                 completed=False,
+                wall_clock_seconds=round(time.time() - task_start_epoch, 3),
             )
             attach_provider_payload(
                 envelope,
@@ -2173,6 +2200,9 @@ def run_single_task(
                 accuracy=0.0,
                 steps=len(episode),
                 feedback=str(e),
+                wall_clock_seconds=wall_clock_seconds,
+                start_time=task_start_iso,
+                end_time=task_end_iso,
             )
 
             if verbose:
@@ -2188,6 +2218,9 @@ def run_single_task(
             "steps": len(episode),
             "env_class": env_class,
             "env_params": env_params,
+            "start_time": task_start_iso,
+            "end_time": task_end_iso,
+            "wall_clock_seconds": wall_clock_seconds,
         }
 
     finally:
@@ -2978,10 +3011,12 @@ def run_config_combinations(
                         r_trimmed = result.get('trimmed_tokens', 0)
                         r_tokens_incl = r_tokens + r_trimmed
                         tok_str = f"{r_tokens:,} tok" if r_trimmed == 0 else f"{r_tokens:,} tok ({r_tokens_incl:,} incl. trimmed)"
+                        r_wall = result.get('wall_clock_seconds')
+                        wall_str = f", {format_duration(r_wall)}" if r_wall is not None else ""
                         if result['status'] == 'success' and r_acc > 0:
-                            progress.console.print(f"  [green]\u2713[/green] {task_name} {state} \u2014 passed (acc: {r_acc}, {r_steps} steps, {tok_str})")
+                            progress.console.print(f"  [green]\u2713[/green] {task_name} {state} \u2014 passed (acc: {r_acc}, {r_steps} steps, {tok_str}{wall_str})")
                         else:
-                            progress.console.print(f"  [red]\u2717[/red] {task_name} {state} \u2014 failed (acc: {r_acc}, {r_steps} steps, {tok_str})")
+                            progress.console.print(f"  [red]\u2717[/red] {task_name} {state} \u2014 failed (acc: {r_acc}, {r_steps} steps, {tok_str}{wall_str})")
                     except Exception as e:
                         results.append({
                             "task_id": task_id,
@@ -3026,9 +3061,13 @@ def run_config_combinations(
                 "reset_tokens": [],
                 "thinking_reset_tokens": [],
                 "summary_tokens": [],
+                "wall_clock_seconds": [],
             }
 
         config_stats[config_id]["total"] += 1
+        wall_clock = result.get("wall_clock_seconds")
+        if wall_clock is not None:
+            config_stats[config_id]["wall_clock_seconds"].append(float(wall_clock))
         if result["status"] == "success":
             config_stats[config_id]["success"] += 1
             accuracy = result.get("accuracy", result["final_reward"])
@@ -3055,6 +3094,7 @@ def run_config_combinations(
     all_reset_tokens = []
     all_thinking_reset_tokens = []
     all_summary_tokens = []
+    all_wall_clock_seconds = []
     for stats in config_stats.values():
         all_accuracies.extend(stats['accuracies'])
         all_steps.extend(stats['steps'])
@@ -3064,6 +3104,7 @@ def run_config_combinations(
         all_reset_tokens.extend(stats['reset_tokens'])
         all_thinking_reset_tokens.extend(stats['thinking_reset_tokens'])
         all_summary_tokens.extend(stats['summary_tokens'])
+        all_wall_clock_seconds.extend(stats['wall_clock_seconds'])
     avg_accuracy = sum(all_accuracies) / len(all_accuracies) if all_accuracies else None
     avg_steps = sum(all_steps) / len(all_steps) if all_steps else None
     avg_tool_calls = sum(all_tool_calls) / len(all_tool_calls) if all_tool_calls else None
@@ -3076,6 +3117,7 @@ def run_config_combinations(
     avg_tokens_incl_trimmed = sum(all_tokens_incl_trimmed) / len(all_tokens_incl_trimmed) if all_tokens_incl_trimmed else None
     avg_tokens_incl_reset = sum(all_tokens_incl_reset) / len(all_tokens_incl_reset) if all_tokens_incl_reset else None
     avg_tokens_incl_all = sum(all_tokens_incl_all) / len(all_tokens_incl_all) if all_tokens_incl_all else None
+    overall_wall_stats = summarize_seconds(all_wall_clock_seconds)
 
     # Save results.json (use task names as keys when available)
     results_file = Path(output_dir) / "results.json"
@@ -3086,6 +3128,7 @@ def run_config_combinations(
         cfg_incl_trimmed = [a + t for a, t in zip(v["api_total_tokens"], v["trimmed_tokens"])]
         cfg_incl_reset = [a + t + r for a, t, r in zip(v["api_total_tokens"], v["trimmed_tokens"], v["reset_tokens"])]
         cfg_incl_all = [a + t + r + th + s for a, t, r, th, s in zip(v["api_total_tokens"], v["trimmed_tokens"], v["reset_tokens"], v["thinking_reset_tokens"], v["summary_tokens"])]
+        wall_stats = summarize_seconds(v["wall_clock_seconds"])
         per_config_data[key] = {
             "success": v["success"],
             "error": v["error"],
@@ -3097,7 +3140,51 @@ def run_config_combinations(
             "avg_api_tokens_incl_trimmed": round(sum(cfg_incl_trimmed) / n, 0) if cfg_incl_trimmed else None,
             "avg_api_tokens_incl_reset": round(sum(cfg_incl_reset) / n, 0) if cfg_incl_reset else None,
             "avg_api_tokens_incl_all": round(sum(cfg_incl_all) / n, 0) if cfg_incl_all else None,
+            "total_wall_clock_seconds": wall_stats["total_seconds"],
+            "avg_wall_clock_seconds": wall_stats["avg_seconds"],
+            "min_wall_clock_seconds": wall_stats["min_seconds"],
+            "max_wall_clock_seconds": wall_stats["max_seconds"],
         }
+
+    # Per-task wall-clock records + per-size-bucket aggregates. These are
+    # written even when some tasks failed, so partial runs remain analysable.
+    task_timings = []
+    for result in results:
+        name = result.get("config_name") or group_id_to_name.get(
+            result.get("config_id", 0), ""
+        )
+        task_timings.append({
+            "task_id": result.get("task_id"),
+            "config_id": result.get("config_id"),
+            "run_id": result.get("run_id"),
+            "config_name": name,
+            "size": parse_size_bucket(name),
+            "status": result.get("status"),
+            "accuracy": result.get("accuracy", result.get("final_reward")),
+            "steps": result.get("steps"),
+            "wall_clock_seconds": result.get("wall_clock_seconds"),
+            "start_time": result.get("start_time"),
+            "end_time": result.get("end_time"),
+            "error": result.get("error"),
+        })
+    timing_buckets = summarize_tasks(task_timings)
+    timing_payload = {
+        "generated_at": utc_now_iso(),
+        "output_dir": str(output_dir),
+        "run_elapsed_seconds": round(elapsed_time, 2),
+        "task_count": len(task_timings),
+        "buckets": timing_buckets,
+        "tasks": sorted(
+            task_timings,
+            key=lambda t: (
+                t.get("size") or "",
+                t.get("config_name") or "",
+                t.get("run_id") or 0,
+            ),
+        ),
+    }
+    timing_file = Path(output_dir) / "task_timings.json"
+    write_json_file(timing_file, timing_payload, indent=2)
 
     results_data = {
         "metadata": {
@@ -3117,14 +3204,23 @@ def run_config_combinations(
             "avg_api_tokens_incl_trimmed": round(avg_tokens_incl_trimmed, 0) if avg_tokens_incl_trimmed is not None else None,
             "avg_api_tokens_incl_reset": round(avg_tokens_incl_reset, 0) if avg_tokens_incl_reset is not None else None,
             "avg_api_tokens_incl_all": round(avg_tokens_incl_all, 0) if avg_tokens_incl_all is not None else None,
+            "total_task_wall_clock_seconds": overall_wall_stats["total_seconds"],
+            "avg_task_wall_clock_seconds": overall_wall_stats["avg_seconds"],
+            "p50_task_wall_clock_seconds": overall_wall_stats["p50_seconds"],
+            "p90_task_wall_clock_seconds": overall_wall_stats["p90_seconds"],
         },
         "per_config": per_config_data,
+        "timing_by_size": timing_buckets,
     }
     write_results_file(
         path=results_file,
         metadata=results_data["metadata"],
         summary=results_data["summary"],
         per_config=results_data["per_config"],
+        extra={
+            "timing_by_size": timing_buckets,
+            "task_timings_file": str(timing_file),
+        },
         indent=2,
     )
 
@@ -3154,8 +3250,25 @@ def run_config_combinations(
     _sc.print(f"  Avg API Tokens (+Reset):  {int(avg_tokens_incl_reset)}" if avg_tokens_incl_reset is not None else "  Avg API Tokens (+Reset):  N/A")
     _sc.print(f"  Avg API Tokens (+All):    {int(avg_tokens_incl_all)}" if avg_tokens_incl_all is not None else "  Avg API Tokens (+All):    N/A")
     _sc.print(f"  Elapsed Time:             {int(elapsed_time)}s")
+    if overall_wall_stats["avg_seconds"] is not None:
+        _sc.print(
+            "  Task Wall Clock:          "
+            f"total {format_duration(overall_wall_stats['total_seconds'])}, "
+            f"avg {format_duration(overall_wall_stats['avg_seconds'])}, "
+            f"p90 {format_duration(overall_wall_stats['p90_seconds'])}"
+        )
+        for bucket, stats in timing_buckets.items():
+            if bucket == "all":
+                continue
+            _sc.print(
+                f"    {bucket:>7}: n={stats['tasks']:>3}  "
+                f"total {format_duration(stats['total_seconds']):>12}  "
+                f"avg {format_duration(stats['avg_seconds']):>10}  "
+                f"p90 {format_duration(stats['p90_seconds'])}"
+            )
     _sc.print(f"[bold]{_line}[/bold]")
     _sc.print(f"  Results: {results_file}")
+    _sc.print(f"  Timings: {timing_file}")
     _sc.print(f"[bold]{_line}[/bold]\n")
 
 

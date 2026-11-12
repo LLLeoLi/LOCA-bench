@@ -35,6 +35,9 @@ def write_eval_file(
     accuracy: float,
     steps: int,
     feedback: str,
+    wall_clock_seconds: Optional[float] = None,
+    start_time: Optional[str] = None,
+    end_time: Optional[str] = None,
 ) -> Path:
     """Write standardized eval.json under a task workspace."""
     eval_path = Path(task_workspace) / "eval.json"
@@ -44,6 +47,12 @@ def write_eval_file(
         "steps": steps,
         "feedback": feedback,
     }
+    if wall_clock_seconds is not None:
+        eval_data["wall_clock_seconds"] = round(float(wall_clock_seconds), 3)
+    if start_time is not None:
+        eval_data["start_time"] = start_time
+    if end_time is not None:
+        eval_data["end_time"] = end_time
     return write_json_file(eval_path, eval_data, indent=2)
 
 

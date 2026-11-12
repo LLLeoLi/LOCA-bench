@@ -10,7 +10,7 @@ import typer
 from rich.console import Console
 
 from loca import __version__
-from loca.cli.commands import run, analyze, list_cmd, run_claude_api, run_claude_agent
+from loca.cli.commands import run, analyze, list_cmd, run_claude_api, run_claude_agent, timings
 
 console = Console()
 
@@ -48,6 +48,9 @@ def main(
 # Register subcommands
 app.command(name="run", help="Run evaluations on benchmark tasks.")(run.run_command)
 app.command(name="analyze", help="Analyze benchmark results.")(analyze.analyze_command)
+app.command(name="timings", help="Summarize per-task wall-clock time by context size.")(
+    timings.timings_command
+)
 app.command(name="list-strategies", help="Show available strategies.")(
     list_cmd.list_strategies_command
 )
